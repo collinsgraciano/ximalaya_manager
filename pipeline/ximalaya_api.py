@@ -103,21 +103,24 @@ def crack_playurl(ciphertext: str) -> str:
 # SSR 页面解析 — 分类采集
 # ═══════════════════════════════════════════════════════════
 
-def extract_albums_from_html(text: str) -> list[dict]:
-    """从 SSR 页面 HTML 中提取 __INITIAL_STATE__ 里的专辑列表。"""
+def extract_albums_from_html(text: str) -> tuple[list[dict], dict]:
+    """从 SSR 页面 HTML 中提取 __INITIAL_STATE__ 里的专辑列表和分页信息。
+
+    返回 (albums, page_info)，page_info 可能包含 maxPageId, totalCount。
+    """
     start = text.find("__INITIAL_STATE__")
     if start < 0:
-        return []
+        return [], {}
 
     eq = text.find("=", start)
     if eq < 0:
-        return []
+        return [], {}
 
     json_start = eq + 1
     while json_start < len(text) and text[json_start] in " \t":
         json_start += 1
     if json_start >= len(text) or text[json_start] != "{":
-        return []
+        return [], {}
 
     # 匹配闭合大括号
     depth = 0
@@ -146,7 +149,7 @@ def extract_albums_from_html(text: str) -> list[dict]:
     try:
         state = json.loads(raw)
     except (json.JSONDecodeError, ValueError):
-        return []
+        return [], {}
 
     # 递归查找 albums 列表
     def find_albums(obj):
@@ -166,13 +169,44 @@ def extract_albums_from_html(text: str) -> list[dict]:
                     return result
         return None
 
-    return find_albums(state) or []
+    albums = find_albums(state) or []
+
+    # 从 state 中提取分页信息
+    page_info = _extract_page_info(state)
+
+    return albums, page_info
+
+
+def _extract_page_info(state: dict) -> dict:
+    """从 __INITIAL_STATE__ 中提取分类页的分页信息。"""
+    info = {}
+
+    def _find_keys(obj):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if k == "maxPageId" and isinstance(v, int):
+                    info["maxPageId"] = v
+                elif k == "totalCount" and isinstance(v, int):
+                    info["totalCount"] = v
+                elif k == "pageCount" and isinstance(v, int):
+                    info["pageCount"] = v
+                if isinstance(v, (dict, list)):
+                    _find_keys(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                _find_keys(item)
+
+    _find_keys(state)
+    return info
 
 
 def fetch_category_page(category: str, page: int, sort: str = "",
                         headers: dict | None = None,
-                        proxies: dict | None = None) -> tuple[list[dict], int]:
-    """抓取分类页面的专辑列表。"""
+                        proxies: dict | None = None) -> tuple[list[dict], dict]:
+    """抓取分类页面的专辑列表。
+
+    返回 (albums, page_info)，page_info 可能包含 maxPageId, totalCount。
+    """
     parts = [BASE_URL, "category", category, "reci1"]
     if sort:
         parts.append(sort)
@@ -182,11 +216,11 @@ def fetch_category_page(category: str, page: int, sort: str = "",
     hdrs = {**DEFAULT_HEADERS, **(headers or {})}
     try:
         resp = requests.get(url, headers=hdrs, timeout=20, proxies=proxies or None)
-        albums = extract_albums_from_html(resp.text)
-        return albums, len(resp.text)
+        albums, page_info = extract_albums_from_html(resp.text)
+        return albums, page_info
     except Exception as e:
         logger.warning(f"抓取分类页面失败 (page={page}): {e}")
-        return [], 0
+        return [], {}
 
 
 def normalize_album_record(album: dict) -> dict:
@@ -224,33 +258,57 @@ def _build_cover_url(album_id: Any, cover_path: str) -> str:
 def scrape_category(category: str, max_pages: int = 0, sort: str = "default",
                     free_only: bool = False, max_albums: int = 0,
                     headers: dict | None = None,
-                    proxies: dict | None = None) -> list[dict]:
-    """采集分类下的所有专辑，返回标准化专辑列表。"""
+                    proxies: dict | None = None,
+                    on_page_done=None,
+                    should_stop=None,
+                    shared_seen_ids: set | None = None) -> list[dict]:
+    """采集分类下的所有专辑，返回标准化专辑列表。
+
+    Args:
+        on_page_done: 回调 fn(page, new_albums, total_so_far) — 每页采集完成后调用，
+                      new_albums 是本页新增的专辑列表（已标准化），可用于增量入库。
+        should_stop: 回调 fn() -> bool — 返回 True 时停止采集（手动停止）。
+        shared_seen_ids: 跨分类共享的去重集合，传入后同一专辑不会在不同分类中重复采集。
+    """
     sort_param = SORT_MAP.get(sort, "")
     all_albums: list[dict] = []
-    seen_ids: set = set()
+    seen_ids: set = shared_seen_ids if shared_seen_ids is not None else set()
 
     page = 1
-    empty_count = 0
-    MAX_EMPTY = 3
+    no_new_count = 0
+    MAX_NO_NEW = 3
+    api_max_pages = 0  # 从 API 获取的真实最大页数
 
     while True:
-        if max_pages > 0 and page > max_pages:
+        # 优先使用用户设定的 max_pages，未设定时用 API 返回的最大页数
+        effective_max = max_pages if max_pages > 0 else api_max_pages
+        if effective_max > 0 and page > effective_max:
             break
         if max_albums > 0 and len(all_albums) >= max_albums:
             break
+        if should_stop and should_stop():
+            logger.info("  用户手动停止采集")
+            break
 
-        albums, html_len = fetch_category_page(category, page, sort_param, headers, proxies)
+        albums, page_info = fetch_category_page(category, page, sort_param, headers, proxies)
+
+        # 第一页时获取 API 的最大页数
+        if page == 1 and page_info:
+            api_max_pages = page_info.get("maxPageId", 0)
+            total_count = page_info.get("totalCount", 0)
+            if api_max_pages or total_count:
+                logger.info(f"  分类 {category}: API 返回 maxPageId={api_max_pages}, totalCount={total_count}")
 
         if not albums:
-            empty_count += 1
-            if empty_count >= MAX_EMPTY:
+            no_new_count += 1
+            if no_new_count >= MAX_NO_NEW:
+                logger.info(f"  连续 {MAX_NO_NEW} 次空页面, 停止采集")
                 break
             page += 1
             time.sleep(1)
             continue
 
-        empty_count = 0
+        page_new_albums: list[dict] = []
         for album in albums:
             aid = album.get("albumId")
             if aid is None or aid in seen_ids:
@@ -260,12 +318,26 @@ def scrape_category(category: str, max_pages: int = 0, sort: str = "default",
             if free_only and album.get("isPaid"):
                 continue
 
-            all_albums.append(normalize_album_record(album))
+            record = normalize_album_record(album)
+            all_albums.append(record)
+            page_new_albums.append(record)
 
             if max_albums > 0 and len(all_albums) >= max_albums:
                 break
 
-        logger.info(f"  page {page}: {len(albums)} 个专辑, 累计 {len(all_albums)}")
+        logger.info(f"  page {page}: {len(albums)} 个专辑, 新增 {len(page_new_albums)}, 累计 {len(all_albums)}")
+
+        if on_page_done:
+            on_page_done(page, page_new_albums, len(all_albums))
+
+        if page_new_albums:
+            no_new_count = 0
+        else:
+            no_new_count += 1
+            if no_new_count >= MAX_NO_NEW:
+                logger.info(f"  连续 {MAX_NO_NEW} 页无新专辑, 停止采集")
+                break
+
         page += 1
         time.sleep(0.5)
 

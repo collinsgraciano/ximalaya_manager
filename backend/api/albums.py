@@ -7,7 +7,9 @@ from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
 from ..services.scrape_service import (
-    scrape_and_save_category,
+    start_scrape,
+    get_scrape_status,
+    stop_scrape,
     scrape_album_tracks,
     get_albums,
     get_album_detail,
@@ -71,11 +73,11 @@ def api_album_chapters(
 
 
 # ═══════════════════════════════════════
-# 触发分类采集
+# 触发分类采集（多分类 + 后台运行）
 # ═══════════════════════════════════════
 
 class ScrapeRequest(BaseModel):
-    category: str
+    categories: list[str]
     max_pages: int = 0
     sort: str = "default"
     free_only: bool = False
@@ -84,15 +86,23 @@ class ScrapeRequest(BaseModel):
 
 @router.post("/albums/scrape")
 def api_scrape(req: ScrapeRequest):
-    try:
-        result = scrape_and_save_category(
-            req.category, req.max_pages, req.sort,
-            req.free_only, req.max_albums,
-        )
-        return {"ok": True, "result": result}
-    except Exception as e:
-        logger.error(f"采集失败: {e}", exc_info=True)
-        return {"ok": False, "error": str(e)}
+    if not req.categories:
+        return {"ok": False, "error": "请至少选择一个分类"}
+    ok = start_scrape(req.categories, req.max_pages, req.sort, req.free_only, req.max_albums)
+    if not ok:
+        return {"ok": False, "error": "已有采集任务正在运行"}
+    return {"ok": True, "message": "采集已启动"}
+
+
+@router.get("/albums/scrape/status")
+def api_scrape_status():
+    return get_scrape_status()
+
+
+@router.post("/albums/scrape/stop")
+def api_scrape_stop():
+    stopped = stop_scrape()
+    return {"ok": stopped}
 
 
 # ═══════════════════════════════════════

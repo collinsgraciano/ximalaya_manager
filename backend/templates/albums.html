@@ -10,6 +10,46 @@
     </button>
 </div>
 
+<!-- 采集进度面板 -->
+<div class="card p-3 mb-3" id="scrape-progress-panel" style="display:none">
+    <div class="d-flex justify-content-between align-items-center mb-2">
+        <div>
+            <span class="spinner-border spinner-border-sm text-primary me-1" id="scrape-spinner"></span>
+            <strong id="scrape-status-text">采集中...</strong>
+        </div>
+        <button class="btn btn-sm btn-outline-danger" id="scrape-stop-btn" onclick="stopScrape()">
+            <i class="bi bi-stop-circle"></i> 停止
+        </button>
+    </div>
+    <div class="row g-2 mb-2">
+        <div class="col-md-3">
+            <small class="text-muted d-block">当前分类</small>
+            <span id="scrape-current-cat">-</span>
+        </div>
+        <div class="col-md-2">
+            <small class="text-muted d-block">当前页</small>
+            <span id="scrape-current-page">-</span>
+        </div>
+        <div class="col-md-2">
+            <small class="text-muted d-block">累计专辑</small>
+            <span id="scrape-total-albums">0</span>
+        </div>
+        <div class="col-md-2">
+            <small class="text-muted d-block">已入库</small>
+            <span id="scrape-saved-albums">0</span>
+        </div>
+        <div class="col-md-3">
+            <small class="text-muted d-block">本页新增</small>
+            <span id="scrape-new-this-page">0</span>
+        </div>
+    </div>
+    <div class="progress mb-2" style="height: 4px;">
+        <div class="progress-bar progress-bar-striped progress-bar-animated" id="scrape-progress-bar" style="width: 100%"></div>
+    </div>
+    <div id="scrape-log" style="max-height: 200px; overflow-y: auto; font-size: 0.8rem; font-family: monospace; background: #f8f9fa; padding: 8px; border-radius: 4px;">
+    </div>
+</div>
+
 <div class="card p-3 mb-3">
     <div class="row g-2 align-items-end">
         <div class="col-md-3">
@@ -64,9 +104,17 @@
             </div>
             <div class="modal-body">
                 <div class="mb-3">
-                    <label class="form-label">分类</label>
-                    <select id="scrape-category" class="form-select"></select>
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <label class="form-label mb-0">选择分类（可多选）</label>
+                        <div>
+                            <button type="button" class="btn btn-sm btn-link p-0 me-2" onclick="toggleAllCategories(true)">全选</button>
+                            <button type="button" class="btn btn-sm btn-link p-0" onclick="toggleAllCategories(false)">取消全选</button>
+                        </div>
+                    </div>
+                    <div class="row g-2" id="scrape-categories-list" style="max-height: 300px; overflow-y: auto;">
+                    </div>
                 </div>
+                <hr>
                 <div class="mb-3">
                     <label class="form-label">排序</label>
                     <select id="scrape-sort" class="form-select">
@@ -77,8 +125,8 @@
                 </div>
                 <div class="row g-2">
                     <div class="col-6">
-                        <label class="form-label small">最大页数 (0=不限)</label>
-                        <input type="number" id="scrape-max-pages" class="form-control form-control-sm" value="0" min="0">
+                        <label class="form-label small">最大页数 (0=用API最大页数)</label>
+                        <input type="number" id="scrape-max-pages" class="form-control form-control-sm" value="50" min="0">
                     </div>
                     <div class="col-6">
                         <label class="form-label small">最大专辑数 (0=不限)</label>
@@ -146,19 +194,30 @@
 <script>
 let currentPage = 1;
 let categoriesMap = {};
+let scrapePollTimer = null;
 
 async function loadCategories() {
     const data = await api('/api/categories');
     const cats = data.categories || {};
     categoriesMap = cats;
     const filterSel = document.getElementById('filter-category');
-    const scrapeSel = document.getElementById('scrape-category');
     const editSel = document.getElementById('edit-category');
+    const catList = document.getElementById('scrape-categories-list');
     for (const [key, name] of Object.entries(cats)) {
         filterSel.innerHTML += `<option value="${key}">${name}</option>`;
-        scrapeSel.innerHTML += `<option value="${key}">${name}</option>`;
         editSel.innerHTML += `<option value="${key}">${name}</option>`;
+        catList.innerHTML += `
+            <div class="col-md-4 col-6">
+                <div class="form-check">
+                    <input type="checkbox" class="form-check-input cat-checkbox" id="cat-${key}" value="${key}">
+                    <label class="form-check-label" for="cat-${key}">${name}</label>
+                </div>
+            </div>`;
     }
+}
+
+function toggleAllCategories(check) {
+    document.querySelectorAll('.cat-checkbox').forEach(cb => cb.checked = check);
 }
 
 async function loadAlbums(page) {
@@ -233,18 +292,18 @@ async function saveAlbum() {
 }
 
 async function doScrape() {
-    const category = document.getElementById('scrape-category').value;
-    if (!category) { showToast('请选择分类', 'warning'); return; }
+    const categories = Array.from(document.querySelectorAll('.cat-checkbox:checked')).map(cb => cb.value);
+    if (categories.length === 0) { showToast('请至少选择一个分类', 'warning'); return; }
 
     const btn = document.getElementById('scrape-btn');
     btn.disabled = true;
-    btn.textContent = '采集中...';
+    btn.textContent = '启动中...';
 
     try {
         const data = await api('/api/albums/scrape', {
             method: 'POST',
             body: JSON.stringify({
-                category,
+                categories,
                 max_pages: parseInt(document.getElementById('scrape-max-pages').value) || 0,
                 sort: document.getElementById('scrape-sort').value,
                 free_only: document.getElementById('scrape-free-only').checked,
@@ -252,18 +311,84 @@ async function doScrape() {
             }),
         });
         if (data.ok) {
-            showToast(`采集完成: ${data.result.saved_albums} 个专辑`, 'success');
             bootstrap.Modal.getInstance(document.getElementById('scrapeModal')).hide();
-            loadAlbums(1);
+            document.getElementById('scrape-progress-panel').style.display = '';
+            pollScrapeStatus();
         } else {
-            showToast('采集失败: ' + (data.error || '未知错误'), 'danger');
+            showToast('启动失败: ' + (data.error || '未知错误'), 'danger');
         }
     } catch (e) {
-        showToast('采集失败: ' + e.message, 'danger');
+        showToast('启动失败: ' + e.message, 'danger');
     } finally {
         btn.disabled = false;
         btn.textContent = '开始采集';
     }
+}
+
+async function pollScrapeStatus() {
+    if (scrapePollTimer) { clearTimeout(scrapePollTimer); scrapePollTimer = null; }
+
+    try {
+        const data = await api('/api/albums/scrape/status');
+
+        document.getElementById('scrape-current-cat').textContent =
+            data.current_category_name
+                ? `${data.current_category_name} (${data.category_index}/${data.category_total})`
+                : '-';
+        document.getElementById('scrape-current-page').textContent = data.current_page || 0;
+        document.getElementById('scrape-total-albums').textContent = data.total_albums || 0;
+        document.getElementById('scrape-saved-albums').textContent = data.saved_albums || 0;
+        document.getElementById('scrape-new-this-page').textContent = data.new_this_page || 0;
+        document.getElementById('scrape-status-text').textContent = data.message || '...';
+
+        const catIdx = data.category_index || 0;
+        const catTotal = data.category_total || 1;
+        const pct = Math.round((catIdx / catTotal) * 100);
+        document.getElementById('scrape-progress-bar').style.width = pct + '%';
+
+        const logEl = document.getElementById('scrape-log');
+        logEl.innerHTML = (data.log || []).map(l => `<div>${l}</div>`).join('');
+        logEl.scrollTop = logEl.scrollHeight;
+
+        if (data.active) {
+            scrapePollTimer = setTimeout(pollScrapeStatus, 1500);
+        } else {
+            document.getElementById('scrape-spinner').classList.remove('spinner-border', 'spinner-border-sm');
+            document.getElementById('scrape-spinner').innerHTML = '<i class="bi bi-check-circle text-success"></i>';
+            document.getElementById('scrape-stop-btn').style.display = 'none';
+            document.getElementById('scrape-progress-bar').classList.remove('progress-bar-animated');
+
+            if (data.status === 'done') {
+                showToast(`采集完成: 共 ${data.total_albums} 个专辑, 入库 ${data.saved_albums} 个`, 'success');
+            } else if (data.status === 'stopped') {
+                showToast('采集已停止', 'warning');
+            } else if (data.status === 'error') {
+                showToast('采集失败: ' + (data.error || ''), 'danger');
+            }
+            setTimeout(() => loadAlbums(1), 1000);
+        }
+    } catch (e) {
+        scrapePollTimer = setTimeout(pollScrapeStatus, 3000);
+    }
+}
+
+async function stopScrape() {
+    try {
+        await api('/api/albums/scrape/stop', { method: 'POST' });
+        showToast('正在停止...', 'warning');
+    } catch (e) {
+        showToast('停止失败: ' + e.message, 'danger');
+    }
+}
+
+async function checkScrapeStatus() {
+    try {
+        const data = await api('/api/albums/scrape/status');
+        if (data.active) {
+            document.getElementById('scrape-progress-panel').style.display = '';
+            pollScrapeStatus();
+        }
+    } catch (e) {}
 }
 
 async function deleteAlbum(bookId) {
@@ -277,6 +402,9 @@ async function deleteAlbum(bookId) {
     }
 }
 
-loadCategories().then(() => loadAlbums(1));
+loadCategories().then(() => {
+    loadAlbums(1);
+    checkScrapeStatus();
+});
 </script>
 {% endblock %}

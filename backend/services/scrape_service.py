@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from psycopg import sql
 from psycopg.types.json import Jsonb
 from datetime import datetime
@@ -19,6 +20,49 @@ from pipeline.ximalaya_api import (
 from pipeline.proxy_pool import init_pool, get_proxy, get_pool, auto_discover_proxies
 
 logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════
+# 采集进度状态（线程安全）
+# ═══════════════════════════════════════════════════════════
+
+_scrape_state: dict = {
+    "active": False,
+    "status": "idle",          # idle / running / done / stopped / error
+    "categories": [],
+    "category_index": 0,
+    "category_total": 0,
+    "current_category": "",
+    "current_category_name": "",
+    "current_page": 0,
+    "total_albums": 0,
+    "saved_albums": 0,
+    "new_this_page": 0,
+    "message": "",
+    "log": [],
+    "error": "",
+    "started_at": "",
+    "finished_at": "",
+}
+_scrape_lock = threading.Lock()
+_scrape_stop_flag = False
+
+
+def get_scrape_status() -> dict:
+    """获取当前采集进度（线程安全副本）。"""
+    with _scrape_lock:
+        return dict(_scrape_state)
+
+
+def stop_scrape() -> bool:
+    """请求停止正在运行的采集任务。"""
+    global _scrape_stop_flag
+    with _scrape_lock:
+        if not _scrape_state["active"]:
+            return False
+        _scrape_stop_flag = True
+        _scrape_state["message"] = "正在停止..."
+        return True
 
 
 def get_xm_cookie() -> str:
@@ -94,39 +138,8 @@ def _init_proxy_pool():
 # 分类采集
 # ═══════════════════════════════════════════════════════════
 
-def scrape_and_save_category(
-    category: str,
-    max_pages: int = 0,
-    sort: str = "default",
-    free_only: bool = False,
-    max_albums: int = 0,
-) -> dict:
-    """采集分类专辑并保存到数据库，返回统计信息。"""
-    # 创建采集任务记录
-    task = execute_returning(
-        sql.SQL("""
-            INSERT INTO public.xm_scrape_tasks (category, category_name, status, created_at)
-            VALUES (%s, %s, 'running', now())
-            RETURNING task_id
-        """),
-        (category, CATEGORIES.get(category, category)),
-    )
-    task_id = task["task_id"] if task else 0
-
-    cookie = get_xm_cookie()
-    headers = _build_headers(cookie)
-
-    # 初始化代理池
-    proxy_enabled, proxies = _init_proxy_pool()
-
-    # 采集
-    albums = _scrape_category(
-        category, max_pages=max_pages, sort=sort,
-        free_only=free_only, max_albums=max_albums,
-        headers=headers, proxies=proxies or None,
-    )
-
-    # 写入数据库（批量 INSERT）
+def _save_albums_to_db(albums: list[dict], category: str) -> int:
+    """批量保存专辑到数据库，返回实际写入数量。"""
     batch_params = []
     for album in albums:
         book_id = f"xm_{album['albumId']}"
@@ -164,25 +177,155 @@ def scrape_and_save_category(
             batch_params,
         )
 
-    saved_count = len(batch_params)
+    return len(batch_params)
 
-    # 更新任务记录
-    execute(
-        sql.SQL("UPDATE public.xm_scrape_tasks SET status = 'done', total_albums = %s, processed_albums = %s, finished_at = now() WHERE task_id = %s"),
-        (len(albums), saved_count, task_id),
+
+def start_scrape(categories: list[str], max_pages: int = 0, sort: str = "default",
+                 free_only: bool = False, max_albums: int = 0) -> bool:
+    """启动后台采集任务（非阻塞）。如果已有任务在运行则返回 False。"""
+    global _scrape_stop_flag
+    with _scrape_lock:
+        if _scrape_state["active"]:
+            return False
+        _scrape_stop_flag = False
+        _scrape_state.update({
+            "active": True,
+            "status": "running",
+            "categories": categories,
+            "category_index": 0,
+            "category_total": len(categories),
+            "current_category": "",
+            "current_category_name": "",
+            "current_page": 0,
+            "total_albums": 0,
+            "saved_albums": 0,
+            "new_this_page": 0,
+            "message": "开始采集",
+            "log": [],
+            "error": "",
+            "started_at": datetime.now().strftime("%H:%M:%S"),
+            "finished_at": "",
+        })
+
+    thread = threading.Thread(
+        target=_scrape_background,
+        args=(categories, max_pages, sort, free_only, max_albums),
+        daemon=True,
     )
+    thread.start()
+    return True
 
-    free_count = sum(1 for a in albums if not a.get("isPaid"))
-    paid_count = len(albums) - free_count
 
-    return {
-        "task_id": task_id,
-        "category": category,
-        "total_albums": len(albums),
-        "saved_albums": saved_count,
-        "free": free_count,
-        "paid": paid_count,
-    }
+def _scrape_background(categories: list[str], max_pages: int, sort: str,
+                       free_only: bool, max_albums: int):
+    """后台采集线程函数。"""
+    global _scrape_stop_flag
+
+    import time as _time
+
+    cookie = get_xm_cookie()
+    headers = _build_headers(cookie)
+    proxy_enabled, proxies = _init_proxy_pool()
+
+    # 跨分类共享去重集合
+    shared_seen_ids: set = set()
+
+    def _log(msg: str):
+        ts = datetime.now().strftime("%H:%M:%S")
+        with _scrape_lock:
+            _scrape_state["log"].append(f"[{ts}] {msg}")
+            _scrape_state["log"] = _scrape_state["log"][-100:]
+
+    def _should_stop():
+        return _scrape_stop_flag
+
+    try:
+        for idx, cat in enumerate(categories):
+            if _scrape_stop_flag:
+                _log("用户手动停止")
+                break
+
+            # 分类之间间隔 3 秒
+            if idx > 0:
+                _log("分类切换间隔 3 秒...")
+                _time.sleep(3)
+                if _scrape_stop_flag:
+                    break
+
+            cat_name = CATEGORIES.get(cat, cat)
+            with _scrape_lock:
+                _scrape_state["current_category"] = cat
+                _scrape_state["current_category_name"] = cat_name
+                _scrape_state["category_index"] = idx + 1
+                _scrape_state["current_page"] = 0
+                _scrape_state["new_this_page"] = 0
+                _scrape_state["message"] = f"正在采集: {cat_name} ({idx + 1}/{len(categories)})"
+            _log(f"开始采集分类: {cat_name}")
+
+            # 创建采集任务记录
+            task = execute_returning(
+                sql.SQL("""
+                    INSERT INTO public.xm_scrape_tasks (category, category_name, status, created_at)
+                    VALUES (%s, %s, 'running', now())
+                    RETURNING task_id
+                """),
+                (cat, cat_name),
+            )
+            task_id = task["task_id"] if task else 0
+
+            cat_stats = {"total": 0, "saved": 0}
+
+            def on_page_done(page, new_albums, total_so_far,
+                             _cat=cat, _cat_name=cat_name, _stats=cat_stats):
+                saved = _save_albums_to_db(new_albums, _cat)
+                _stats["total"] = total_so_far
+                _stats["saved"] += saved
+                with _scrape_lock:
+                    _scrape_state["current_page"] = page
+                    _scrape_state["total_albums"] += len(new_albums)
+                    _scrape_state["saved_albums"] += saved
+                    _scrape_state["new_this_page"] = len(new_albums)
+                    _scrape_state["log"].append(
+                        f"[{datetime.now().strftime('%H:%M:%S')}] {_cat_name} 第{page}页: "
+                        f"+{len(new_albums)} 新专辑 (入库{saved}), 累计 {total_so_far}"
+                    )
+                    _scrape_state["log"] = _scrape_state["log"][-100:]
+
+            albums = _scrape_category(
+                cat, max_pages=max_pages, sort=sort,
+                free_only=free_only, max_albums=max_albums,
+                headers=headers, proxies=proxies or None,
+                on_page_done=on_page_done,
+                should_stop=_should_stop,
+                shared_seen_ids=shared_seen_ids,
+            )
+
+            # 更新任务记录
+            execute(
+                sql.SQL("UPDATE public.xm_scrape_tasks SET status = %s, total_albums = %s, "
+                        "processed_albums = %s, finished_at = now() WHERE task_id = %s"),
+                ("cancelled" if _scrape_stop_flag else "done",
+                 cat_stats["total"], cat_stats["saved"], task_id),
+            )
+            _log(f"分类 {cat_name} 完成: {cat_stats['total']} 个专辑, 入库 {cat_stats['saved']}")
+
+        with _scrape_lock:
+            _scrape_state["status"] = "stopped" if _scrape_stop_flag else "done"
+            _scrape_state["active"] = False
+            _scrape_state["message"] = "已停止" if _scrape_stop_flag else "采集完成"
+            _scrape_state["finished_at"] = datetime.now().strftime("%H:%M:%S")
+
+    except Exception as e:
+        logger.error(f"采集异常: {e}", exc_info=True)
+        with _scrape_lock:
+            _scrape_state["status"] = "error"
+            _scrape_state["active"] = False
+            _scrape_state["error"] = str(e)
+            _scrape_state["message"] = f"采集失败: {e}"
+            _scrape_state["finished_at"] = datetime.now().strftime("%H:%M:%S")
+            _scrape_state["log"].append(
+                f"[{datetime.now().strftime('%H:%M:%S')}] 错误: {e}"
+            )
 
 
 def scrape_album_tracks(book_id: str) -> dict:
