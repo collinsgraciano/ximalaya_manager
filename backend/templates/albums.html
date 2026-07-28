@@ -16,6 +16,9 @@
             <button class="btn btn-outline-success" onclick="createAllJobs()">
                 <i class="bi bi-plus-circle"></i> 创建全部任务
             </button>
+            <button class="btn btn-outline-warning" onclick="fixCoverCdn()">
+                <i class="bi bi-image-alt"></i> 修复封面CDN
+            </button>
             <button class="btn btn-outline-danger" onclick="deleteAllAlbums()">
                 <i class="bi bi-trash"></i> 删除全部
             </button>
@@ -194,6 +197,13 @@
                     <input type="checkbox" class="form-check-input" id="scrape-free-only">
                     <label class="form-check-label" for="scrape-free-only">仅免费专辑</label>
                 </div>
+                <div class="form-check">
+                    <input type="checkbox" class="form-check-input" id="scrape-subcategories" checked>
+                    <label class="form-check-label" for="scrape-subcategories">
+                        采集子分类 <small class="text-muted">(展开子分类树逐个采集，绕过3000上限)</small>
+                    </label>
+                </div>
+                <div id="subcategory-tree-container" class="mt-2" style="max-height: 200px; overflow-y: auto; font-size: 0.8rem;"></div>
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
@@ -268,6 +278,7 @@ async function loadCategories() {
                 <div class="form-check">
                     <input type="checkbox" class="form-check-input cat-checkbox" id="cat-${key}" value="${key}">
                     <label class="form-check-label" for="cat-${key}">${name}</label>
+                    <a href="javascript:void(0)" class="ms-1" style="font-size:0.7rem;" onclick="loadSubcategoryTree('${key}')" title="查看子分类">[子分类]</a>
                 </div>
             </div>`;
     }
@@ -275,6 +286,36 @@ async function loadCategories() {
 
 function toggleAllCategories(check) {
     document.querySelectorAll('.cat-checkbox').forEach(cb => cb.checked = check);
+    document.getElementById('subcategory-tree-container').innerHTML = '';
+}
+
+async function loadSubcategoryTree(catKey) {
+    const treeEl = document.getElementById('subcategory-tree-container');
+    try {
+        treeEl.innerHTML = '<small class="text-muted">加载子分类...</small>';
+        const data = await api(`/api/categories/${catKey}/subcategories`);
+        const subs = data.subcategories || {};
+        const bIds = Object.keys(subs);
+        if (bIds.length === 0) {
+            treeEl.innerHTML = '<small class="text-muted">该分类无子分类</small>';
+            return;
+        }
+        let html = '';
+        for (const bId of bIds) {
+            const g = subs[bId];
+            html += `<div><strong>b${bId} ${g.name}</strong> (${g.subs.length})</div>`;
+            html += '<div style="padding-left: 1.5rem;">';
+            for (const s of g.subs) {
+                html += `<div>c${s.id} ${s.name}</div>`;
+            }
+            html += '</div>';
+        }
+        const totalLeaves = bIds.reduce((sum, bId) => sum + subs[bId].subs.length, 0);
+        html = `<div class="mb-1"><small class="text-muted">${bIds.length} 组, ${totalLeaves} 个叶子子分类</small></div>` + html;
+        treeEl.innerHTML = html;
+    } catch (e) {
+        treeEl.innerHTML = '<small class="text-danger">加载失败</small>';
+    }
 }
 
 async function loadAlbums(page) {
@@ -365,6 +406,7 @@ async function doScrape() {
                 sort: document.getElementById('scrape-sort').value,
                 free_only: document.getElementById('scrape-free-only').checked,
                 max_albums: parseInt(document.getElementById('scrape-max-albums').value) || 0,
+                scrape_subcategories: document.getElementById('scrape-subcategories').checked,
             }),
         });
         if (data.ok) {
@@ -494,6 +536,25 @@ async function createAllJobs() {
         }
     } catch (e) {
         showToast('创建失败: ' + e.message, 'danger');
+    }
+}
+
+// ═══════════════════════════════════════
+// 一键修复封面 CDN
+// ═══════════════════════════════════════
+
+async function fixCoverCdn() {
+    if (!confirm('确认修复所有专辑的封面图 CDN 地址？\n(imagev2.ximalaya.com → fdfs.xmcdn.com)')) return;
+    try {
+        const data = await api('/api/albums/fix-covers', { method: 'POST' });
+        if (data.ok) {
+            showToast(data.fixed > 0 ? `已修复 ${data.fixed} 个封面` : (data.message || '无需修复'), 'success');
+            loadAlbums(currentPage);
+        } else {
+            showToast('修复失败: ' + (data.error || '未知错误'), 'danger');
+        }
+    } catch (e) {
+        showToast('修复失败: ' + e.message, 'danger');
     }
 }
 

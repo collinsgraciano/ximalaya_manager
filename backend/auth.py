@@ -122,9 +122,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if _is_public(path):
             return await call_next(request)
 
-        # Colab Worker API — Token 认证
+        # Colab Worker API — Token 认证（Web 管理员 Cookie 也可访问）
         if _is_worker_api(path):
-            if _verify_worker_token(request):
+            if _verify_worker_token(request) or is_authenticated(request):
                 return await call_next(request)
             return JSONResponse(status_code=401, content={"detail": "Worker Token 无效"})
 

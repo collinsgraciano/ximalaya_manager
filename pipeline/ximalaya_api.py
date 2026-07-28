@@ -30,27 +30,29 @@ BASE_URL = "https://www.ximalaya.com"
 
 ALBUMS_API = BASE_URL + "/revision/category/v2/albums"
 ALL_CATEGORY_INFO_API = BASE_URL + "/revision/category/allCategoryInfo"
+METADATA_INFO_API = BASE_URL + "/revision/category/v2/metadata/info"
 
 # 默认分类列表 (拼音code: (categoryId, 中文名))
 # 运行时可通过 get_categories() 从 API 动态更新
 DEFAULT_CATEGORIES = {
-    "youshengshu": (3, "有声书"),
-    "ertong": (6, "儿童"),
-    "xiangsheng": (12, "相声评书"),
     "yinyue": (2, "音乐"),
-    "lishi": (9, "历史"),
-    "shangye": (8, "商业财经"),
-    "waiyu": (5, "外语"),
-    "keji": (18, "IT科技"),
-    "jiankang": (7, "健康养生"),
-    "qinggan": (10, "情感"),
-    "qiche": (21, "汽车"),
-    "lvyou": (22, "旅游"),
-    "guangbojv": (15, "广播剧"),
-    "xiqu": (16, "戏曲"),
-    "gerenchengzhang": (13, "教育培训"),
-    "toutiao": (1, "头条"),
+    "youshengshu": (3, "有声书"),
     "yule": (4, "娱乐"),
+    "waiyu": (5, "外语"),
+    "ertong": (6, "儿童"),
+    "shangye": (8, "商业财经"),
+    "lishi": (9, "历史"),
+    "xiangsheng": (12, "相声评书"),
+    "gerenchengzhang": (13, "个人成长"),
+    "guangbojv": (15, "广播剧"),
+    "youshengtushu": (1001, "有声图书"),
+    "renwenguoxue": (1002, "人文国学"),
+    "redian": (1005, "热点"),
+    "shenghuo": (1006, "生活"),
+    "xinhongse": (1054, "新红色频道"),
+    "xuanyi": (1061, "悬疑"),
+    "jiankang": (1062, "健康"),
+    "qiche": (1065, "汽车"),
 }
 
 # 向后兼容别名
@@ -150,6 +152,74 @@ def get_categories(headers: dict | None = None,
 
 
 # ═══════════════════════════════════════════════════════════
+# 子分类树获取
+# ═══════════════════════════════════════════════════════════
+
+def fetch_subcategories(category_id: int, headers: dict | None = None,
+                        proxies: dict | None = None) -> dict:
+    """从 metadata/info API 获取分类的子分类树。
+
+    网站URL格式: /category/a{catId}_b{bId}_c{cId}/
+    树结构: 根(分类) > b层(组) > c层(叶子)
+
+    Returns:
+        {b_id: {"name": str, "subs": [{"id": c_id, "name": str}, ...]}}
+    """
+    hdrs = {**DEFAULT_HEADERS, **(headers or {})}
+    try:
+        resp = requests.get(METADATA_INFO_API,
+                            params={"categoryId": category_id},
+                            headers=hdrs, timeout=15, proxies=proxies or None)
+        resp.raise_for_status()
+        metadata = resp.json().get("data", {}).get("metadata", [])
+
+        groups: dict = {}  # b_id -> {name, subs: {c_id: name}}
+
+        def walk(node, b_id=None, b_name=None):
+            """递归遍历元数据树。
+
+            - b_id=None: 根层, 子节点是 b 组
+            - b_id=值: b 组内, 递归到叶子节点收集 c_id
+            """
+            if not isinstance(node, dict):
+                return
+            vid = node.get("id")
+            vname = node.get("displayName", node.get("name", ""))
+            children = node.get("metadataValues") or []
+
+            if b_id is None:
+                for child in children:
+                    if isinstance(child, dict):
+                        cid = child.get("id")
+                        cname = child.get("displayName", child.get("name", ""))
+                        groups[cid] = {"name": cname, "subs": {}}
+                        walk(child, b_id=cid, b_name=cname)
+            else:
+                if children:
+                    for child in children:
+                        walk(child, b_id=b_id, b_name=b_name)
+                else:
+                    if vid not in groups[b_id]["subs"]:
+                        groups[b_id]["subs"][vid] = vname
+
+        for root in metadata:
+            walk(root)
+
+        result = {}
+        for bid in sorted(groups.keys()):
+            g = groups[bid]
+            result[bid] = {
+                "name": g["name"],
+                "subs": [{"id": cid, "name": name}
+                         for cid, name in sorted(g["subs"].items(), key=lambda x: x[1])],
+            }
+        return result
+    except Exception as e:
+        logger.warning(f"获取子分类失败 (category_id={category_id}): {e}")
+        return {}
+
+
+# ═══════════════════════════════════════════════════════════
 # 分类采集 — JSON API
 # ═══════════════════════════════════════════════════════════
 
@@ -229,26 +299,26 @@ def scrape_category(category: str, max_pages: int = 0, sort: str = "default",
                     proxies: dict | None = None,
                     on_page_done=None,
                     should_stop=None,
-                    shared_seen_ids: set | None = None) -> list[dict]:
+                    shared_seen_ids: set | None = None,
+                    scrape_subcategories: bool = False) -> list[dict]:
     """采集分类下的所有专辑，返回标准化专辑列表。
 
     Args:
         category: 分类拼音名 (如 "lishi") 或数字 ID 字符串
-        on_page_done: 回调 fn(page, new_albums, total_so_far) — 每页采集完成后调用，
-                      new_albums 是本页新增的专辑列表（已标准化），可用于增量入库。
+        on_page_done: 回调 fn(page, new_albums, total_so_far, sub_info=None)
         should_stop: 回调 fn() -> bool — 返回 True 时停止采集（手动停止）。
-        shared_seen_ids: 跨分类共享的去重集合，传入后同一专辑不会在不同分类中重复采集。
+        shared_seen_ids: 跨分类共享的去重集合。
+        scrape_subcategories: 是否自动展开子分类树逐个叶子采集（绕过 3000 上限）。
     """
     sort_val = SORT_MAP.get(sort, 0)
 
-    # 解析 categoryId: 优先从 CATEGORIES 查找，其次尝试数字
+    # 解析 categoryId
     cat_info = CATEGORIES.get(category)
     if isinstance(cat_info, tuple):
         category_id = cat_info[0]
     elif str(category).isdigit():
         category_id = int(category)
     else:
-        # 尝试动态获取分类列表
         dynamic_cats = get_categories(headers, proxies)
         dyn_info = dynamic_cats.get(category)
         if isinstance(dyn_info, tuple):
@@ -260,35 +330,78 @@ def scrape_category(category: str, max_pages: int = 0, sort: str = "default",
     all_albums: list[dict] = []
     seen_ids: set = shared_seen_ids if shared_seen_ids is not None else set()
 
+    # 确定采集目标列表: [(target_id, sub_info), ...]
+    targets: list[tuple[int, dict | None]] = []
+
+    if scrape_subcategories:
+        subcats = fetch_subcategories(category_id, headers, proxies)
+        if subcats:
+            for b_id, group in subcats.items():
+                for sub in group["subs"]:
+                    sub_info = {
+                        "b_id": b_id,
+                        "c_id": sub["id"],
+                        "b_name": group["name"],
+                        "c_name": sub["name"],
+                        "name": f"{group['name']}/{sub['name']}",
+                    }
+                    targets.append((sub["id"], sub_info))
+            logger.info(f"  分类 {category}(ID={category_id}): 展开为 {len(targets)} 个子分类")
+        else:
+            targets.append((category_id, None))
+    else:
+        targets.append((category_id, None))
+
+    # 逐个目标采集
+    for target_id, sub_info in targets:
+        if should_stop and should_stop():
+            logger.info("  用户手动停止采集")
+            break
+        if max_albums > 0 and len(all_albums) >= max_albums:
+            break
+
+        _scrape_target(
+            target_id, sort_val, max_pages, max_albums, free_only,
+            headers, proxies, all_albums, seen_ids,
+            on_page_done, should_stop, sub_info,
+        )
+
+    return all_albums
+
+
+def _scrape_target(target_id: int, sort_val: int, max_pages: int,
+                   max_albums: int, free_only: bool,
+                   headers: dict | None, proxies: dict | None,
+                   all_albums: list[dict], seen_ids: set,
+                   on_page_done, should_stop, sub_info: dict | None = None):
+    """采集单个目标 (顶级分类或叶子子分类) 的专辑，追加到 all_albums。"""
+    label = sub_info["name"] if sub_info else str(target_id)
     page = 1
     no_new_count = 0
     MAX_NO_NEW = 3
-    api_max_pages = 0  # 从 API 获取的真实最大页数
+    api_max_pages = 0
 
     while True:
-        # 优先使用用户设定的 max_pages，未设定时用 API 返回的最大页数
         effective_max = max_pages if max_pages > 0 else api_max_pages
         if effective_max > 0 and page > effective_max:
             break
         if max_albums > 0 and len(all_albums) >= max_albums:
             break
         if should_stop and should_stop():
-            logger.info("  用户手动停止采集")
             break
 
-        albums, page_info = fetch_category_page(category_id, page, sort_val, headers, proxies)
+        albums, page_info = fetch_category_page(target_id, page, sort_val, headers, proxies)
 
-        # 第一页时获取 API 的总页数
         if page == 1 and page_info:
             api_max_pages = page_info.get("max_page", 0)
             total_count = page_info.get("total", 0)
             if api_max_pages or total_count:
-                logger.info(f"  分类 {category}(ID={category_id}): API 返回总数 {total_count}, 最大页 {api_max_pages}")
+                logger.info(f"  [{label}] 总数 {total_count}, 最大页 {api_max_pages}")
 
         if not albums:
             no_new_count += 1
             if no_new_count >= MAX_NO_NEW:
-                logger.info(f"  连续 {MAX_NO_NEW} 次空页面, 停止采集")
+                logger.info(f"  [{label}] 连续 {MAX_NO_NEW} 次空页面, 跳过")
                 break
             page += 1
             time.sleep(1)
@@ -305,29 +418,31 @@ def scrape_category(category: str, max_pages: int = 0, sort: str = "default",
                 continue
 
             record = normalize_album_record(album)
+            if sub_info:
+                record["subcategory"] = sub_info["name"]
+                record["subcategory_b_id"] = sub_info["b_id"]
+                record["subcategory_c_id"] = sub_info["c_id"]
             all_albums.append(record)
             page_new_albums.append(record)
 
             if max_albums > 0 and len(all_albums) >= max_albums:
                 break
 
-        logger.info(f"  page {page}: {len(albums)} 个专辑, 新增 {len(page_new_albums)}, 累计 {len(all_albums)}")
+        logger.info(f"  [{label}] page {page}: {len(albums)} 个专辑, 新增 {len(page_new_albums)}, 累计 {len(all_albums)}")
 
         if on_page_done:
-            on_page_done(page, page_new_albums, len(all_albums))
+            on_page_done(page, page_new_albums, len(all_albums), sub_info=sub_info)
 
         if page_new_albums:
             no_new_count = 0
         else:
             no_new_count += 1
             if no_new_count >= MAX_NO_NEW:
-                logger.info(f"  连续 {MAX_NO_NEW} 页无新专辑, 停止采集")
+                logger.info(f"  [{label}] 连续 {MAX_NO_NEW} 页无新专辑, 跳过")
                 break
 
         page += 1
         time.sleep(0.5)
-
-    return all_albums
 
 
 # ═══════════════════════════════════════════════════════════

@@ -18,6 +18,7 @@ from pipeline.ximalaya_api import (
     normalize_album_record,
     CATEGORIES,
     get_categories as _get_api_categories,
+    fetch_subcategories as _fetch_subcategories,
 )
 from pipeline.proxy_pool import init_pool, get_proxy, get_pool, get_random_proxy, auto_discover_proxies
 
@@ -279,7 +280,8 @@ def _save_albums_to_db(albums: list[dict], category: str) -> int:
 
 
 def start_scrape(categories: list[str], max_pages: int = 0, sort: str = "default",
-                 free_only: bool = False, max_albums: int = 0) -> bool:
+                 free_only: bool = False, max_albums: int = 0,
+                 scrape_subcategories: bool = False) -> bool:
     """启动后台采集任务（非阻塞）。如果已有任务在运行则返回 False。"""
     global _scrape_stop_flag
     with _scrape_lock:
@@ -307,7 +309,7 @@ def start_scrape(categories: list[str], max_pages: int = 0, sort: str = "default
 
     thread = threading.Thread(
         target=_scrape_background,
-        args=(categories, max_pages, sort, free_only, max_albums),
+        args=(categories, max_pages, sort, free_only, max_albums, scrape_subcategories),
         daemon=True,
     )
     thread.start()
@@ -315,7 +317,7 @@ def start_scrape(categories: list[str], max_pages: int = 0, sort: str = "default
 
 
 def _scrape_background(categories: list[str], max_pages: int, sort: str,
-                       free_only: bool, max_albums: int):
+                       free_only: bool, max_albums: int, scrape_subcategories: bool):
     """后台采集线程函数。"""
     global _scrape_stop_flag
 
@@ -374,18 +376,19 @@ def _scrape_background(categories: list[str], max_pages: int, sort: str,
 
             cat_stats = {"total": 0, "saved": 0}
 
-            def on_page_done(page, new_albums, total_so_far,
+            def on_page_done(page, new_albums, total_so_far, sub_info=None,
                              _cat=cat, _cat_name=cat_name, _stats=cat_stats):
                 saved = _save_albums_to_db(new_albums, _cat)
                 _stats["total"] = total_so_far
                 _stats["saved"] += saved
+                label = f"{_cat_name}/{sub_info['name']}" if sub_info else _cat_name
                 with _scrape_lock:
                     _scrape_state["current_page"] = page
                     _scrape_state["total_albums"] += len(new_albums)
                     _scrape_state["saved_albums"] += saved
                     _scrape_state["new_this_page"] = len(new_albums)
                     _scrape_state["log"].append(
-                        f"[{datetime.now().strftime('%H:%M:%S')}] {_cat_name} 第{page}页: "
+                        f"[{datetime.now().strftime('%H:%M:%S')}] {label} 第{page}页: "
                         f"+{len(new_albums)} 新专辑 (入库{saved}), 累计 {total_so_far}"
                     )
                     _scrape_state["log"] = _scrape_state["log"][-100:]
@@ -397,6 +400,7 @@ def _scrape_background(categories: list[str], max_pages: int, sort: str,
                 on_page_done=on_page_done,
                 should_stop=_should_stop,
                 shared_seen_ids=shared_seen_ids,
+                scrape_subcategories=scrape_subcategories,
             )
 
             # 更新任务记录
@@ -818,3 +822,28 @@ def get_categories() -> dict:
     """返回可用分类列表 {pinyin: name} 供前端使用。"""
     cats = _get_api_categories()
     return {k: v[1] if isinstance(v, tuple) else v for k, v in cats.items()}
+
+
+def get_subcategories(category: str) -> dict:
+    """返回指定分类的子分类树。
+
+    Returns:
+        {b_id: {"name": str, "subs": [{"id": c_id, "name": str}, ...]}}
+    """
+    cat_info = CATEGORIES.get(category)
+    if isinstance(cat_info, tuple):
+        category_id = cat_info[0]
+    elif str(category).isdigit():
+        category_id = int(category)
+    else:
+        dynamic_cats = _get_api_categories()
+        dyn_info = dynamic_cats.get(category)
+        if isinstance(dyn_info, tuple):
+            category_id = dyn_info[0]
+        else:
+            return {}
+
+    cookie = get_xm_cookie()
+    headers = _build_headers(cookie)
+    _, proxies = _init_proxy_pool()
+    return _fetch_subcategories(category_id, headers, proxies or None)
