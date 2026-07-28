@@ -5,9 +5,17 @@
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-4">
     <h4 class="mb-0">专辑管理</h4>
-    <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#scrapeModal">
-        <i class="bi bi-cloud-download"></i> 采集分类
-    </button>
+    <div class="btn-group">
+        <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#scrapeModal">
+            <i class="bi bi-cloud-download"></i> 采集分类
+        </button>
+        <button class="btn btn-outline-info" id="btn-scrape-all-tracks" onclick="startAllTracksScrape()">
+            <i class="bi bi-list-ol"></i> 获取全部章节
+        </button>
+        <button class="btn btn-outline-danger" onclick="deleteAllAlbums()">
+            <i class="bi bi-trash"></i> 删除全部
+        </button>
+    </div>
 </div>
 
 <!-- 采集进度面板 -->
@@ -47,6 +55,42 @@
         <div class="progress-bar progress-bar-striped progress-bar-animated" id="scrape-progress-bar" style="width: 100%"></div>
     </div>
     <div id="scrape-log" style="max-height: 200px; overflow-y: auto; font-size: 0.8rem; font-family: monospace; background: #f8f9fa; padding: 8px; border-radius: 4px;">
+    </div>
+</div>
+
+<!-- 章节采集进度面板 -->
+<div class="card p-3 mb-3" id="tracks-progress-panel" style="display:none">
+    <div class="d-flex justify-content-between align-items-center mb-2">
+        <div>
+            <span class="spinner-border spinner-border-sm text-info me-1" id="tracks-spinner"></span>
+            <strong id="tracks-status-text">获取章节中...</strong>
+        </div>
+        <button class="btn btn-sm btn-outline-danger" id="tracks-stop-btn" onclick="stopAllTracksScrape()">
+            <i class="bi bi-stop-circle"></i> 停止
+        </button>
+    </div>
+    <div class="row g-2 mb-2">
+        <div class="col-md-3">
+            <small class="text-muted d-block">当前专辑</small>
+            <span id="tracks-current-book">-</span>
+        </div>
+        <div class="col-md-2">
+            <small class="text-muted d-block">总数</small>
+            <span id="tracks-total">0</span>
+        </div>
+        <div class="col-md-2">
+            <small class="text-muted d-block">成功</small>
+            <span class="text-success" id="tracks-done">0</span>
+        </div>
+        <div class="col-md-2">
+            <small class="text-muted d-block">失败</small>
+            <span class="text-danger" id="tracks-failed">0</span>
+        </div>
+    </div>
+    <div class="progress mb-2" style="height: 4px;">
+        <div class="progress-bar progress-bar-striped progress-bar-animated bg-info" id="tracks-progress-bar" style="width: 0%"></div>
+    </div>
+    <div id="tracks-log" style="max-height: 200px; overflow-y: auto; font-size: 0.8rem; font-family: monospace; background: #f8f9fa; padding: 8px; border-radius: 4px;">
     </div>
 </div>
 
@@ -402,9 +446,106 @@ async function deleteAlbum(bookId) {
     }
 }
 
+// ═══════════════════════════════════════
+// 删除全部专辑
+// ═══════════════════════════════════════
+
+async function deleteAllAlbums() {
+    if (!confirm('确认删除所有专辑及其所有章节？此操作不可撤销！')) return;
+    if (!confirm('再次确认：真的要删除全部专辑吗？')) return;
+    try {
+        const data = await api('/api/albums/all', { method: 'DELETE' });
+        showToast(`已删除 ${data.deleted} 个专辑`, 'success');
+        loadAlbums(1);
+    } catch (e) {
+        showToast('删除失败: ' + e.message, 'danger');
+    }
+}
+
+// ═══════════════════════════════════════
+// 批量获取全部章节
+// ═══════════════════════════════════════
+
+let tracksPollTimer = null;
+
+async function startAllTracksScrape() {
+    try {
+        const data = await api('/api/albums/scrape-all-tracks', { method: 'POST' });
+        if (data.ok) {
+            document.getElementById('tracks-progress-panel').style.display = '';
+            pollTracksStatus();
+        } else {
+            showToast('启动失败: ' + (data.error || ''), 'danger');
+        }
+    } catch (e) {
+        showToast('启动失败: ' + e.message, 'danger');
+    }
+}
+
+async function pollTracksStatus() {
+    if (tracksPollTimer) { clearTimeout(tracksPollTimer); tracksPollTimer = null; }
+
+    try {
+        const data = await api('/api/albums/scrape-all-tracks/status');
+
+        document.getElementById('tracks-current-book').textContent = data.current_book || '-';
+        document.getElementById('tracks-total').textContent = data.total || 0;
+        document.getElementById('tracks-done').textContent = data.done || 0;
+        document.getElementById('tracks-failed').textContent = data.failed || 0;
+        document.getElementById('tracks-status-text').textContent = data.message || '...';
+
+        const pct = data.total > 0 ? Math.round(((data.done + data.failed) / data.total) * 100) : 0;
+        document.getElementById('tracks-progress-bar').style.width = pct + '%';
+
+        const logEl = document.getElementById('tracks-log');
+        logEl.innerHTML = (data.log || []).map(l => `<div>${l}</div>`).join('');
+        logEl.scrollTop = logEl.scrollHeight;
+
+        if (data.active) {
+            tracksPollTimer = setTimeout(pollTracksStatus, 1500);
+        } else {
+            document.getElementById('tracks-spinner').classList.remove('spinner-border', 'spinner-border-sm');
+            document.getElementById('tracks-spinner').innerHTML = '<i class="bi bi-check-circle text-success"></i>';
+            document.getElementById('tracks-stop-btn').style.display = 'none';
+            document.getElementById('tracks-progress-bar').classList.remove('progress-bar-animated');
+
+            if (data.status === 'done') {
+                showToast(`章节获取完成: 成功 ${data.done}, 失败 ${data.failed}`, 'success');
+            } else if (data.status === 'stopped') {
+                showToast('章节获取已停止', 'warning');
+            } else if (data.status === 'error') {
+                showToast('章节获取失败: ' + (data.message || ''), 'danger');
+            }
+            setTimeout(() => loadAlbums(currentPage), 1000);
+        }
+    } catch (e) {
+        tracksPollTimer = setTimeout(pollTracksStatus, 3000);
+    }
+}
+
+async function stopAllTracksScrape() {
+    try {
+        await api('/api/albums/scrape-all-tracks/stop', { method: 'POST' });
+        showToast('正在停止...', 'warning');
+    } catch (e) {
+        showToast('停止失败: ' + e.message, 'danger');
+    }
+}
+
+async function checkTracksStatus() {
+    try {
+        const data = await api('/api/albums/scrape-all-tracks/status');
+        if (data.active) {
+            document.getElementById('tracks-progress-panel').style.display = '';
+            pollTracksStatus();
+        }
+    } catch (e) {}
+}
+
 loadCategories().then(() => {
     loadAlbums(1);
     checkScrapeStatus();
+    checkTracksStatus();
 });
 </script>
 {% endblock %}

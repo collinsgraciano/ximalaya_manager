@@ -582,6 +582,145 @@ def delete_album(book_id: str) -> int:
     return execute(sql.SQL("DELETE FROM public.books WHERE book_id = %s"), (book_id,))
 
 
+def delete_all_albums() -> int:
+    """删除所有专辑及其章节。"""
+    execute(sql.SQL("DELETE FROM public.audiobook_chapters"))
+    return execute(sql.SQL("DELETE FROM public.books"))
+
+
+# ═══════════════════════════════════════════════════════════
+# 批量章节采集（后台线程）
+# ═══════════════════════════════════════════════════════════
+
+_tracks_state: dict = {
+    "active": False,
+    "status": "idle",
+    "total": 0,
+    "done": 0,
+    "failed": 0,
+    "current_book": "",
+    "message": "",
+    "log": [],
+    "started_at": "",
+    "finished_at": "",
+}
+_tracks_lock = threading.Lock()
+_tracks_stop_flag = False
+
+
+def get_tracks_status() -> dict:
+    with _tracks_lock:
+        return dict(_tracks_state)
+
+
+def stop_tracks_scrape() -> bool:
+    global _tracks_stop_flag
+    with _tracks_lock:
+        if not _tracks_state["active"]:
+            return False
+        _tracks_stop_flag = True
+        _tracks_state["message"] = "正在停止..."
+        return True
+
+
+def start_scrape_all_tracks() -> bool:
+    global _tracks_stop_flag
+    with _tracks_lock:
+        if _tracks_state["active"]:
+            return False
+        _tracks_stop_flag = False
+        _tracks_state.update({
+            "active": True,
+            "status": "running",
+            "total": 0,
+            "done": 0,
+            "failed": 0,
+            "current_book": "",
+            "message": "开始获取章节",
+            "log": [],
+            "started_at": datetime.now().strftime("%H:%M:%S"),
+            "finished_at": "",
+        })
+
+    thread = threading.Thread(target=_scrape_all_tracks_background, daemon=True)
+    thread.start()
+    return True
+
+
+def _scrape_all_tracks_background():
+    global _tracks_stop_flag
+    import time as _time
+
+    cookie = get_xm_cookie()
+    headers = _build_headers(cookie)
+    proxy_enabled, proxies = _init_proxy_pool()
+
+    def _log(msg: str):
+        ts = datetime.now().strftime("%H:%M:%S")
+        with _tracks_lock:
+            _tracks_state["log"].append(f"[{ts}] {msg}")
+            _tracks_state["log"] = _tracks_state["log"][-100:]
+
+    try:
+        rows = fetch_all("SELECT book_id, book_name FROM public.books ORDER BY book_id")
+        if not rows:
+            _log("没有专辑需要处理")
+            with _tracks_lock:
+                _tracks_state["status"] = "done"
+                _tracks_state["active"] = False
+                _tracks_state["message"] = "没有专辑需要处理"
+                _tracks_state["finished_at"] = datetime.now().strftime("%H:%M:%S")
+            return
+
+        with _tracks_lock:
+            _tracks_state["total"] = len(rows)
+        _log(f"共 {len(rows)} 个专辑需要获取章节")
+
+        for idx, row in enumerate(rows):
+            if _tracks_stop_flag:
+                _log("用户手动停止")
+                break
+
+            book_id = row["book_id"]
+            book_name = row.get("book_name", book_id)
+
+            with _tracks_lock:
+                _tracks_state["current_book"] = f"{book_name} ({idx + 1}/{len(rows)})"
+                _tracks_state["message"] = f"正在获取: {book_name} ({idx + 1}/{len(rows)})"
+            _log(f"开始获取章节: {book_name}")
+
+            try:
+                result = scrape_album_tracks(book_id)
+                if result.get("ok"):
+                    with _tracks_lock:
+                        _tracks_state["done"] += 1
+                    _log(f"  {book_name}: {result.get('total_tracks', 0)} 集")
+                else:
+                    with _tracks_lock:
+                        _tracks_state["failed"] += 1
+                    _log(f"  {book_name} 失败: {result.get('error', '未知错误')}")
+            except Exception as e:
+                with _tracks_lock:
+                    _tracks_state["failed"] += 1
+                _log(f"  {book_name} 异常: {e}")
+
+            _time.sleep(1)
+
+        with _tracks_lock:
+            _tracks_state["status"] = "stopped" if _tracks_stop_flag else "done"
+            _tracks_state["active"] = False
+            _tracks_state["message"] = "已停止" if _tracks_stop_flag else "全部完成"
+            _tracks_state["finished_at"] = datetime.now().strftime("%H:%M:%S")
+
+    except Exception as e:
+        logger.error(f"批量章节采集异常: {e}", exc_info=True)
+        with _tracks_lock:
+            _tracks_state["status"] = "error"
+            _tracks_state["active"] = False
+            _tracks_state["message"] = f"错误: {e}"
+            _tracks_state["finished_at"] = datetime.now().strftime("%H:%M:%S")
+
+
 def get_categories() -> dict:
     """返回可用分类列表。"""
     return CATEGORIES

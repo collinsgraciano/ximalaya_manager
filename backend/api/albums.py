@@ -15,6 +15,10 @@ from ..services.scrape_service import (
     get_album_detail,
     get_album_chapters,
     delete_album,
+    delete_all_albums,
+    start_scrape_all_tracks,
+    get_tracks_status,
+    stop_tracks_scrape,
     get_categories,
 )
 
@@ -239,7 +243,40 @@ def api_reset_chapters(book_id: str):
 
 
 # ═══════════════════════════════════════
-# 删除专辑
+# 删除所有专辑
+# ═══════════════════════════════════════
+
+@router.delete("/albums/all")
+def api_delete_all_albums():
+    deleted = delete_all_albums()
+    return {"ok": True, "deleted": deleted}
+
+
+# ═══════════════════════════════════════
+# 批量获取所有专辑章节（后台线程）
+# ═══════════════════════════════════════
+
+@router.post("/albums/scrape-all-tracks")
+def api_scrape_all_tracks():
+    ok = start_scrape_all_tracks()
+    if not ok:
+        return {"ok": False, "error": "已有章节采集任务正在运行"}
+    return {"ok": True, "message": "批量章节采集已启动"}
+
+
+@router.get("/albums/scrape-all-tracks/status")
+def api_scrape_all_tracks_status():
+    return get_tracks_status()
+
+
+@router.post("/albums/scrape-all-tracks/stop")
+def api_scrape_all_tracks_stop():
+    stopped = stop_tracks_scrape()
+    return {"ok": stopped}
+
+
+# ═══════════════════════════════════════
+# 删除单个专辑
 # ═══════════════════════════════════════
 
 @router.delete("/albums/{book_id}")
