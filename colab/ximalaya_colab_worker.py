@@ -156,8 +156,25 @@ class ColabWorker:
             return
 
         proxy_list = self.config.get("proxy_list", [])
+
+        # 当手动列表为空时，从 PROXY_LIST_URL 自动发现中国代理
         if not proxy_list:
-            logger.warning("代理已启用但代理列表为空")
+            list_url = self.config.get("proxy_list_url", "")
+            if list_url:
+                from pipeline.proxy_pool import auto_discover_proxies
+                verify_country = self.config.get("proxy_verify_country", "中国")
+                max_tests = int(self.config.get("proxy_max_tests", 100))
+                timeout = int(self.config.get("proxy_timeout", 10))
+                logger.info(f"PROXY_LIST 为空，从 URL 自动发现代理: {list_url}")
+                proxy_list = auto_discover_proxies(
+                    list_url=list_url,
+                    verify_country=verify_country,
+                    max_tests=max_tests,
+                    timeout=min(timeout, 5),
+                )
+
+        if not proxy_list:
+            logger.warning("代理已启用但无可用代理（手动列表和自动发现均为空）")
             return
 
         from pipeline.proxy_pool import init_pool, get_pool

@@ -72,7 +72,7 @@
 const SETTING_GROUPS = {
     'Telegram': ['TG_BOT_TOKEN', 'TG_CHAT_ID', 'TG_SERIAL_UPLOAD', 'TG_UPLOAD_INTERVAL'],
     '喜马拉雅': ['XM_COOKIE', 'DOWNLOAD_INTERVAL'],
-    '代理': ['PROXY_ENABLED', 'PROXY_LIST', 'PROXY_TEST_URL', 'PROXY_DEAD_RETRY_MINUTES', 'PROXY_TIMEOUT'],
+    '代理': ['PROXY_ENABLED', 'PROXY_LIST', 'PROXY_LIST_URL', 'PROXY_VERIFY_COUNTRY', 'PROXY_MAX_TESTS', 'PROXY_TEST_URL', 'PROXY_DEAD_RETRY_MINUTES', 'PROXY_TIMEOUT'],
     'DeepFilter': ['ENABLE_DEEPFILTER', 'DEEPFILTER_SEGMENT_MINUTES'],
 };
 
@@ -212,6 +212,9 @@ async function previewConfig() {
             proxy_enabled: settings.find(s => s.setting_key === 'PROXY_ENABLED')?.setting_value || 'false',
             proxy_list: (settings.find(s => s.setting_key === 'PROXY_LIST')?.setting_value || '')
                 .split('\n').map(t => t.trim()).filter(Boolean).length + ' 个代理',
+            proxy_list_url: settings.find(s => s.setting_key === 'PROXY_LIST_URL')?.setting_value || '(空)',
+            proxy_verify_country: settings.find(s => s.setting_key === 'PROXY_VERIFY_COUNTRY')?.setting_value || '中国',
+            proxy_max_tests: parseInt(settings.find(s => s.setting_key === 'PROXY_MAX_TESTS')?.setting_value || '100'),
             proxy_test_url: settings.find(s => s.setting_key === 'PROXY_TEST_URL')?.setting_value || 'https://www.ximalaya.com',
             proxy_dead_retry_minutes: parseInt(settings.find(s => s.setting_key === 'PROXY_DEAD_RETRY_MINUTES')?.setting_value || '5'),
             proxy_timeout: parseInt(settings.find(s => s.setting_key === 'PROXY_TIMEOUT')?.setting_value || '10'),

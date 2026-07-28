@@ -8,7 +8,7 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 from datetime import datetime
 
-from ..database import fetch_one, fetch_all, execute, execute_returning, execute_batch
+from ..database import fetch_one, fetch_all, fetch_val, execute, execute_returning, execute_batch
 from pipeline.ximalaya_api import (
     scrape_category as _scrape_category,
     get_all_tracks as _get_all_tracks,
@@ -16,7 +16,7 @@ from pipeline.ximalaya_api import (
     normalize_album_record,
     CATEGORIES,
 )
-from pipeline.proxy_pool import init_pool, get_proxy, get_pool
+from pipeline.proxy_pool import init_pool, get_proxy, get_pool, auto_discover_proxies
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,8 @@ def _init_proxy_pool():
     """
     rows = fetch_all(
         "SELECT setting_key, setting_value FROM public.global_settings "
-        "WHERE setting_key IN ('PROXY_ENABLED', 'PROXY_LIST', 'PROXY_TEST_URL', "
+        "WHERE setting_key IN ('PROXY_ENABLED', 'PROXY_LIST', 'PROXY_LIST_URL', "
+        "'PROXY_VERIFY_COUNTRY', 'PROXY_MAX_TESTS', 'PROXY_TEST_URL', "
         "'PROXY_DEAD_RETRY_MINUTES', 'PROXY_TIMEOUT')"
     )
     settings_map = {row["setting_key"]: row["setting_value"] for row in (rows or [])}
@@ -54,8 +55,24 @@ def _init_proxy_pool():
 
     proxy_list_raw = settings_map.get("PROXY_LIST", "")
     proxy_list = [line.strip() for line in proxy_list_raw.splitlines() if line.strip()]
+
+    # 当手动列表为空时，从 PROXY_LIST_URL 自动发现
     if not proxy_list:
-        return False, {}
+        list_url = settings_map.get("PROXY_LIST_URL", "")
+        if list_url:
+            verify_country = settings_map.get("PROXY_VERIFY_COUNTRY", "中国")
+            max_tests = int(settings_map.get("PROXY_MAX_TESTS", "100"))
+            timeout = int(settings_map.get("PROXY_TIMEOUT", "10"))
+            logger.info(f"PROXY_LIST 为空，从 URL 自动发现代理: {list_url}")
+            proxy_list = auto_discover_proxies(
+                list_url=list_url,
+                verify_country=verify_country,
+                max_tests=max_tests,
+                timeout=min(timeout, 5),  # 国家检测用较短超时
+            )
+        if not proxy_list:
+            logger.warning("代理已启用但无可用代理（手动列表和自动发现均为空）")
+            return False, {}
 
     init_pool(
         proxy_list=proxy_list,

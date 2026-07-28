@@ -1,6 +1,7 @@
-"""代理池 — 按延迟排序 + 健康检测 + 死亡标记。
+"""代理池 — 自动发现 + 按延迟排序 + 健康检测 + 死亡标记。
 
 VPS 采集端和 Colab 下载端共用。
+支持从 URL 自动获取代理列表并用 ip-api.com 筛选中国代理。
 优先使用延迟低速度快的代理，死亡代理超时后自动恢复并重新测速。
 """
 
@@ -10,6 +11,7 @@ import time
 import logging
 import threading
 import requests
+import concurrent.futures
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +21,91 @@ def build_proxies_dict(proxy_url: str) -> dict:
     if not proxy_url:
         return {}
     return {"http": proxy_url, "https": proxy_url}
+
+
+def _test_proxy_china(proxy_full_str: str, timeout: int = 5) -> tuple[str, str] | None:
+    """测试代理是否在中国且网络连通，返回 (proxy_url, 位置描述) 或 None。
+
+    使用 http://ip-api.com/json/?lang=zh-CN 检测代理出口 IP 的地理位置。
+    """
+    proxies = {"http": proxy_full_str, "https": proxy_full_str}
+    try:
+        resp = requests.get(
+            "http://ip-api.com/json/?lang=zh-CN",
+            proxies=proxies,
+            timeout=timeout,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            country = data.get("country", "Unknown")
+            city = data.get("city", "")
+            if country in ("China", "中国"):
+                location = f"{country} - {city}" if city else country
+                return proxy_full_str, location
+    except Exception:
+        pass
+    return None
+
+
+def auto_discover_proxies(
+    list_url: str,
+    verify_country: str = "中国",
+    max_tests: int = 100,
+    timeout: int = 5,
+    fallback_list: list[str] | None = None,
+) -> list[str]:
+    """从 URL 获取代理列表，并发检测筛选中国代理。
+
+    Args:
+        list_url: 代理列表 API URL，返回 text（每行一个 ip:port 或 protocol://ip:port）
+        verify_country: 目标国家名（中英文均可），如 "中国" / "China"
+        max_tests: 最多测试的候选代理数量
+        timeout: 单个代理测试超时秒数
+        fallback_list: 在线列表获取失败时的备用代理
+
+    Returns:
+        筛选后的中国代理 URL 列表（可能为空）
+    """
+    # 获取在线代理列表
+    try:
+        resp = requests.get(list_url, timeout=10)
+        resp.raise_for_status()
+        # 解析空格或换行分隔的列表
+        raw_list = [p.strip() for p in resp.text.replace("\n", " ").split(" ") if p.strip()]
+    except Exception as e:
+        logger.warning(f"获取在线代理列表失败: {e}")
+        raw_list = fallback_list or []
+
+    if not raw_list:
+        logger.warning("代理列表为空（在线获取失败且无备用列表）")
+        return []
+
+    # 补全协议前缀（proxyscrape 返回的格式可能是 ip:port 或 http://ip:port）
+    normalized: list[str] = []
+    for p in raw_list:
+        if not p.startswith(("http://", "https://", "socks5://", "socks4://")):
+            p = f"http://{p}"
+        normalized.append(p)
+
+    test_list = normalized[:max_tests]
+    logger.info(f"共找到 {len(normalized)} 个候选代理, 正在验证前 {len(test_list)} 个 (筛选国家: {verify_country})...")
+
+    found: list[str] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        futures = {executor.submit(_test_proxy_china, p, timeout): p for p in test_list}
+        for future in concurrent.futures.as_completed(futures):
+            result = future.result()
+            if result:
+                proxy_url, location = result
+                found.append(proxy_url)
+                logger.info(f"  匹配成功: {proxy_url} ({location})")
+
+    if found:
+        logger.info(f"成功找到 {len(found)} 个中国代理")
+    else:
+        logger.warning("列表中无可用中国代理")
+
+    return found
 
 
 class ProxyPool:
