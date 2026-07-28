@@ -28,48 +28,43 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.ximalaya.com"
 
-CATEGORIES = {
-    "youshengshu": "有声书",
-    "ertong": "儿童",
-    "xiangsheng": "相声评书",
-    "yinyue": "音乐",
-    "lishi": "历史",
-    "renwen": "人文",
-    "shangye": "商业财经",
-    "waiguo": "外语",
-    "keji": "科技",
-    "jiankang": "健康",
-    "qinggan": "情感生活",
-    "tiyu": "体育",
-    "youxi": "游戏",
-    "xiuxian": "休闲",
-    "sanzijing": "广播剧",
-    "guoxue": "国学",
-    "jingji": "经济",
-    "sheying": "摄影",
-    "meishi": "美食",
-    "lvyou": "旅游",
-    "qiche": "汽车",
-    "yingyu": "英语",
-    "riyu": "日语",
-    "hanyu": "韩语",
-    "fayu": "法语",
-    "deyu": "德语",
-    "jiaoyu": "教育考试",
-    "kexue": "科学",
-    "xiaoshuo": "小说",
-    "duanju": "短剧",
-    "xiju": "戏剧",
-    "pingshu": "评书",
+ALBUMS_API = BASE_URL + "/revision/category/v2/albums"
+ALL_CATEGORY_INFO_API = BASE_URL + "/revision/category/allCategoryInfo"
+
+# 默认分类列表 (拼音code: (categoryId, 中文名))
+# 运行时可通过 get_categories() 从 API 动态更新
+DEFAULT_CATEGORIES = {
+    "youshengshu": (3, "有声书"),
+    "ertong": (6, "儿童"),
+    "xiangsheng": (12, "相声评书"),
+    "yinyue": (2, "音乐"),
+    "lishi": (9, "历史"),
+    "shangye": (8, "商业财经"),
+    "waiyu": (5, "外语"),
+    "keji": (18, "IT科技"),
+    "jiankang": (7, "健康养生"),
+    "qinggan": (10, "情感"),
+    "qiche": (21, "汽车"),
+    "lvyou": (22, "旅游"),
+    "guangbojv": (15, "广播剧"),
+    "xiqu": (16, "戏曲"),
+    "gerenchengzhang": (13, "教育培训"),
+    "toutiao": (1, "头条"),
+    "yule": (4, "娱乐"),
 }
 
+# 向后兼容别名
+CATEGORIES = DEFAULT_CATEGORIES
+
+# 排序方式: 0=综合, 1=最火, 2=最新
 SORT_MAP = {
-    "default": "",
-    "mostplays": "mostplays",
-    "updates": "updates",
+    "default": 0,
+    "mostplays": 1,
+    "updates": 2,
 }
 
-ALBUMS_PER_PAGE = 30
+# 每页专辑数 (API 最大 50)
+ALBUMS_PER_PAGE = 50
 
 QUALITY_PRIORITY = ["M4A_128", "M4A_64", "MP3_64", "MP3_32", "M4A_24"]
 
@@ -100,124 +95,97 @@ def crack_playurl(ciphertext: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════
-# SSR 页面解析 — 分类采集
+# 分类列表动态获取
 # ═══════════════════════════════════════════════════════════
 
-def extract_albums_from_html(text: str) -> tuple[list[dict], dict]:
-    """从 SSR 页面 HTML 中提取 __INITIAL_STATE__ 里的专辑列表和分页信息。
+_cached_categories: dict | None = None
+_cache_time: float = 0
+_CACHE_TTL = 3600  # 1 小时
 
-    返回 (albums, page_info)，page_info 可能包含 maxPageId, totalCount。
+
+def fetch_category_info(headers: dict | None = None,
+                         proxies: dict | None = None) -> dict:
+    """从 allCategoryInfo API 获取完整分类信息 (含拼音和 categoryId)。
+
+    返回 dict: {pinyin: (categoryId, title)}
     """
-    start = text.find("__INITIAL_STATE__")
-    if start < 0:
-        return [], {}
-
-    eq = text.find("=", start)
-    if eq < 0:
-        return [], {}
-
-    json_start = eq + 1
-    while json_start < len(text) and text[json_start] in " \t":
-        json_start += 1
-    if json_start >= len(text) or text[json_start] != "{":
-        return [], {}
-
-    # 匹配闭合大括号
-    depth = 0
-    i = json_start
-    in_str = False
-    esc = False
-    while i < len(text):
-        c = text[i]
-        if esc:
-            esc = False
-        elif c == "\\":
-            esc = True
-        elif c == '"':
-            in_str = not in_str
-        elif not in_str:
-            if c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-                if depth == 0:
-                    i += 1
-                    break
-        i += 1
-
-    raw = text[json_start:i]
-    try:
-        state = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        return [], {}
-
-    # 递归查找 albums 列表
-    def find_albums(obj):
-        if isinstance(obj, dict):
-            for k, v in obj.items():
-                if (k == "albums" and isinstance(v, list) and v
-                        and isinstance(v[0], dict) and "albumId" in v[0]):
-                    return v
-                if isinstance(v, (dict, list)):
-                    result = find_albums(v)
-                    if result:
-                        return result
-        elif isinstance(obj, list):
-            for item in obj:
-                result = find_albums(item)
-                if result:
-                    return result
-        return None
-
-    albums = find_albums(state) or []
-
-    # 从 state 中提取分页信息
-    page_info = _extract_page_info(state)
-
-    return albums, page_info
-
-
-def _extract_page_info(state: dict) -> dict:
-    """从 __INITIAL_STATE__ 中提取分类页的分页信息。"""
-    info = {}
-
-    def _find_keys(obj):
-        if isinstance(obj, dict):
-            for k, v in obj.items():
-                if k == "maxPageId" and isinstance(v, int):
-                    info["maxPageId"] = v
-                elif k == "totalCount" and isinstance(v, int):
-                    info["totalCount"] = v
-                elif k == "pageCount" and isinstance(v, int):
-                    info["pageCount"] = v
-                if isinstance(v, (dict, list)):
-                    _find_keys(v)
-        elif isinstance(obj, list):
-            for item in obj:
-                _find_keys(item)
-
-    _find_keys(state)
-    return info
-
-
-def fetch_category_page(category: str, page: int, sort: str = "",
-                        headers: dict | None = None,
-                        proxies: dict | None = None) -> tuple[list[dict], dict]:
-    """抓取分类页面的专辑列表。
-
-    返回 (albums, page_info)，page_info 可能包含 maxPageId, totalCount。
-    """
-    parts = [BASE_URL, "category", category, "reci1"]
-    if sort:
-        parts.append(sort)
-    parts.append(f"p{page}")
-    url = "/".join(parts)
-
     hdrs = {**DEFAULT_HEADERS, **(headers or {})}
     try:
-        resp = requests.get(url, headers=hdrs, timeout=20, proxies=proxies or None)
-        albums, page_info = extract_albums_from_html(resp.text)
-        return albums, page_info
+        resp = requests.get(ALL_CATEGORY_INFO_API, headers=hdrs,
+                            timeout=15, proxies=proxies or None)
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+        cats = {}
+        for group in data:
+            for cat in group.get("categories", []):
+                cid = cat.get("categoryId")
+                pinyin = cat.get("pinyin", "")
+                title = cat.get("displayName", "")
+                if pinyin and cid:
+                    cats[pinyin] = (cid, title)
+        return cats
+    except Exception as e:
+        logger.warning(f"获取分类信息失败: {e}")
+        return {}
+
+
+def get_categories(headers: dict | None = None,
+                   proxies: dict | None = None) -> dict:
+    """获取分类列表, 优先从 API 获取, 失败则用默认列表。
+
+    返回 dict: {pinyin: (categoryId, title)}
+    结果缓存 1 小时。
+    """
+    global _cached_categories, _cache_time
+    import time as _time
+    now = _time.time()
+    if _cached_categories and (now - _cache_time) < _CACHE_TTL:
+        return _cached_categories
+    cats = fetch_category_info(headers, proxies)
+    if cats:
+        _cached_categories = cats
+        _cache_time = now
+        return cats
+    return DEFAULT_CATEGORIES
+
+
+# ═══════════════════════════════════════════════════════════
+# 分类采集 — JSON API
+# ═══════════════════════════════════════════════════════════
+
+def fetch_category_page(category_id: int, page: int, sort: int = 0,
+                        headers: dict | None = None,
+                        proxies: dict | None = None) -> tuple[list[dict], dict]:
+    """通过 JSON API 获取一页专辑列表。
+
+    Args:
+        category_id: 分类数字 ID
+        page: 页码 (从 1 开始)
+        sort: 排序方式 (0=综合, 1=最火, 2=最新)
+
+    Returns:
+        (albums_list, page_info) — page_info 包含 total, max_page
+    """
+    params = {
+        "categoryId": category_id,
+        "pageNum": page,
+        "pageSize": ALBUMS_PER_PAGE,
+        "sort": sort,
+    }
+    hdrs = {**DEFAULT_HEADERS, **(headers or {})}
+    try:
+        resp = requests.get(ALBUMS_API, params=params, headers=hdrs,
+                            timeout=20, proxies=proxies or None)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("ret") != 200:
+            logger.warning(f"API 返回 ret={data.get('ret')} msg={data.get('msg', '')}")
+            return [], {}
+        d = data.get("data", {})
+        albums = d.get("albums", [])
+        total = d.get("total", 0)
+        max_page = (total + ALBUMS_PER_PAGE - 1) // ALBUMS_PER_PAGE if total > 0 else 0
+        return albums, {"total": total, "max_page": max_page}
     except Exception as e:
         logger.warning(f"抓取分类页面失败 (page={page}): {e}")
         return [], {}
@@ -265,12 +233,30 @@ def scrape_category(category: str, max_pages: int = 0, sort: str = "default",
     """采集分类下的所有专辑，返回标准化专辑列表。
 
     Args:
+        category: 分类拼音名 (如 "lishi") 或数字 ID 字符串
         on_page_done: 回调 fn(page, new_albums, total_so_far) — 每页采集完成后调用，
                       new_albums 是本页新增的专辑列表（已标准化），可用于增量入库。
         should_stop: 回调 fn() -> bool — 返回 True 时停止采集（手动停止）。
         shared_seen_ids: 跨分类共享的去重集合，传入后同一专辑不会在不同分类中重复采集。
     """
-    sort_param = SORT_MAP.get(sort, "")
+    sort_val = SORT_MAP.get(sort, 0)
+
+    # 解析 categoryId: 优先从 CATEGORIES 查找，其次尝试数字
+    cat_info = CATEGORIES.get(category)
+    if isinstance(cat_info, tuple):
+        category_id = cat_info[0]
+    elif str(category).isdigit():
+        category_id = int(category)
+    else:
+        # 尝试动态获取分类列表
+        dynamic_cats = get_categories(headers, proxies)
+        dyn_info = dynamic_cats.get(category)
+        if isinstance(dyn_info, tuple):
+            category_id = dyn_info[0]
+        else:
+            logger.warning(f"未知分类: {category}")
+            return []
+
     all_albums: list[dict] = []
     seen_ids: set = shared_seen_ids if shared_seen_ids is not None else set()
 
@@ -290,14 +276,14 @@ def scrape_category(category: str, max_pages: int = 0, sort: str = "default",
             logger.info("  用户手动停止采集")
             break
 
-        albums, page_info = fetch_category_page(category, page, sort_param, headers, proxies)
+        albums, page_info = fetch_category_page(category_id, page, sort_val, headers, proxies)
 
-        # 第一页时获取 API 的最大页数
+        # 第一页时获取 API 的总页数
         if page == 1 and page_info:
-            api_max_pages = page_info.get("maxPageId", 0)
-            total_count = page_info.get("totalCount", 0)
+            api_max_pages = page_info.get("max_page", 0)
+            total_count = page_info.get("total", 0)
             if api_max_pages or total_count:
-                logger.info(f"  分类 {category}: API 返回 maxPageId={api_max_pages}, totalCount={total_count}")
+                logger.info(f"  分类 {category}(ID={category_id}): API 返回总数 {total_count}, 最大页 {api_max_pages}")
 
         if not albums:
             no_new_count += 1

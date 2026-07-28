@@ -16,6 +16,7 @@ from pipeline.ximalaya_api import (
     get_album_info as _get_album_info,
     normalize_album_record,
     CATEGORIES,
+    get_categories as _get_api_categories,
 )
 from pipeline.proxy_pool import init_pool, get_proxy, get_pool, auto_discover_proxies
 
@@ -330,7 +331,8 @@ def _scrape_background(categories: list[str], max_pages: int, sort: str,
                 if _scrape_stop_flag:
                     break
 
-            cat_name = CATEGORIES.get(cat, cat)
+            cat_info = CATEGORIES.get(cat)
+            cat_name = cat_info[1] if isinstance(cat_info, tuple) else (cat_info or cat)
             with _scrape_lock:
                 _scrape_state["current_category"] = cat
                 _scrape_state["current_category_name"] = cat_name
@@ -728,5 +730,6 @@ def _scrape_all_tracks_background():
 
 
 def get_categories() -> dict:
-    """返回可用分类列表。"""
-    return CATEGORIES
+    """返回可用分类列表 {pinyin: name} 供前端使用。"""
+    cats = _get_api_categories()
+    return {k: v[1] if isinstance(v, tuple) else v for k, v in cats.items()}
