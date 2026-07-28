@@ -160,6 +160,8 @@ INSERT INTO public.global_settings (setting_key, setting_value, description, is_
     ('PROXY_LIST_URL', 'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text&country=cn', '自动获取代理列表的URL（当 PROXY_LIST 为空时使用）', false),
     ('PROXY_VERIFY_COUNTRY', '中国', '验证代理所在国家（通过 ip-api.com 检测）。填国家名如 中国/China，留空则不验证国家', false),
     ('PROXY_MAX_TESTS', '100', '自动发现时代理最大测试数量', false),
+    ('PROXY_REFRESH_HOURS', '6', '自动发现代理的刷新间隔（小时）。超过此时间后重新获取检测', false),
+    ('PROXY_VERIFIED_CACHE', '', '系统内部使用：缓存的已验证代理列表（JSON），请勿手动修改', false),
     ('PROXY_TEST_URL', 'https://www.ximalaya.com', '代理健康检测URL', false),
     ('PROXY_DEAD_RETRY_MINUTES', '5', '死亡代理重试间隔（分钟）', false),
     ('PROXY_TIMEOUT', '10', '代理请求超时秒数', false)

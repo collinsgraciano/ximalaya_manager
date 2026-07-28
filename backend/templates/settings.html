@@ -72,7 +72,7 @@
 const SETTING_GROUPS = {
     'Telegram': ['TG_BOT_TOKEN', 'TG_CHAT_ID', 'TG_SERIAL_UPLOAD', 'TG_UPLOAD_INTERVAL'],
     '喜马拉雅': ['XM_COOKIE', 'DOWNLOAD_INTERVAL'],
-    '代理': ['PROXY_ENABLED', 'PROXY_LIST', 'PROXY_LIST_URL', 'PROXY_VERIFY_COUNTRY', 'PROXY_MAX_TESTS', 'PROXY_TEST_URL', 'PROXY_DEAD_RETRY_MINUTES', 'PROXY_TIMEOUT'],
+    '代理': ['PROXY_ENABLED', 'PROXY_LIST', 'PROXY_LIST_URL', 'PROXY_VERIFY_COUNTRY', 'PROXY_MAX_TESTS', 'PROXY_REFRESH_HOURS', 'PROXY_TEST_URL', 'PROXY_DEAD_RETRY_MINUTES', 'PROXY_TIMEOUT'],
     'DeepFilter': ['ENABLE_DEEPFILTER', 'DEEPFILTER_SEGMENT_MINUTES'],
 };
 
@@ -196,31 +196,29 @@ function addSettingRow() {
 
 async function previewConfig() {
     try {
-        const data = await api('/api/settings');
-        const settings = (data.settings || []).filter(s => s.setting_value && s.setting_value !== '******');
-        // 模拟 /api/config 的返回
-        const cfg = {
-            tg_bot_tokens: (settings.find(s => s.setting_key === 'TG_BOT_TOKEN')?.setting_value || '')
-                .split(',').map(t => t.trim()).filter(Boolean).length + ' 个 Token',
-            tg_chat_id: settings.find(s => s.setting_key === 'TG_CHAT_ID')?.setting_value || '(空)',
-            xm_cookie: settings.find(s => s.setting_key === 'XM_COOKIE')?.setting_value ? '已配置 (' + settings.find(s => s.setting_key === 'XM_COOKIE').setting_value.length + ' 字符)' : '(空)',
-            enable_deepfilter: settings.find(s => s.setting_key === 'ENABLE_DEEPFILTER')?.setting_value || 'true',
-            deepfilter_segment_minutes: parseInt(settings.find(s => s.setting_key === 'DEEPFILTER_SEGMENT_MINUTES')?.setting_value || '60'),
-            download_interval: parseFloat(settings.find(s => s.setting_key === 'DOWNLOAD_INTERVAL')?.setting_value || '1.5'),
-            tg_serial_upload: settings.find(s => s.setting_key === 'TG_SERIAL_UPLOAD')?.setting_value || 'true',
-            tg_upload_interval: parseFloat(settings.find(s => s.setting_key === 'TG_UPLOAD_INTERVAL')?.setting_value || '3'),
-            proxy_enabled: settings.find(s => s.setting_key === 'PROXY_ENABLED')?.setting_value || 'false',
-            proxy_list: (settings.find(s => s.setting_key === 'PROXY_LIST')?.setting_value || '')
-                .split('\n').map(t => t.trim()).filter(Boolean).length + ' 个代理',
-            proxy_list_url: settings.find(s => s.setting_key === 'PROXY_LIST_URL')?.setting_value || '(空)',
-            proxy_verify_country: settings.find(s => s.setting_key === 'PROXY_VERIFY_COUNTRY')?.setting_value || '中国',
-            proxy_max_tests: parseInt(settings.find(s => s.setting_key === 'PROXY_MAX_TESTS')?.setting_value || '100'),
-            proxy_test_url: settings.find(s => s.setting_key === 'PROXY_TEST_URL')?.setting_value || 'https://www.ximalaya.com',
-            proxy_dead_retry_minutes: parseInt(settings.find(s => s.setting_key === 'PROXY_DEAD_RETRY_MINUTES')?.setting_value || '5'),
-            proxy_timeout: parseInt(settings.find(s => s.setting_key === 'PROXY_TIMEOUT')?.setting_value || '10'),
-        };
+        const data = await api('/api/config');
+        const cfg = data.config || {};
+        const rows = [
+            ['tg_bot_tokens', (cfg.tg_bot_tokens || []).length + ' 个 Token'],
+            ['tg_chat_id', cfg.tg_chat_id || '(空)'],
+            ['xm_cookie', cfg.xm_cookie ? '已配置 (' + cfg.xm_cookie.length + ' 字符)' : '(空)'],
+            ['enable_deepfilter', cfg.enable_deepfilter],
+            ['deepfilter_segment_minutes', cfg.deepfilter_segment_minutes],
+            ['download_interval', cfg.download_interval],
+            ['tg_serial_upload', cfg.tg_serial_upload],
+            ['tg_upload_interval', cfg.tg_upload_interval],
+            ['proxy_enabled', cfg.proxy_enabled],
+            ['proxy_list', (cfg.proxy_list || []).length + ' 个代理'],
+            ['proxy_list_url', cfg.proxy_list_url || '(空)'],
+            ['proxy_verify_country', cfg.proxy_verify_country || '中国'],
+            ['proxy_max_tests', cfg.proxy_max_tests],
+            ['proxy_refresh_hours', cfg.proxy_refresh_hours + ' 小时'],
+            ['proxy_test_url', cfg.proxy_test_url || 'https://www.ximalaya.com'],
+            ['proxy_dead_retry_minutes', cfg.proxy_dead_retry_minutes],
+            ['proxy_timeout', cfg.proxy_timeout],
+        ];
         let html = '<table class="table table-sm"><tbody>';
-        for (const [k, v] of Object.entries(cfg)) {
+        for (const [k, v] of rows) {
             html += `<tr><td style="width:280px"><code>${k}</code></td><td>${v}</td></tr>`;
         }
         html += '</tbody></table>';

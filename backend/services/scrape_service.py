@@ -82,13 +82,21 @@ def _build_headers(cookie: str = "") -> dict:
 def _init_proxy_pool():
     """从全局设置读取代理配置并初始化代理池。
 
+    代理列表优先级：
+    1. PROXY_LIST 手动填写 → 直接使用，不缓存
+    2. PROXY_VERIFIED_CACHE 缓存 → 未过期则复用
+    3. 从 PROXY_LIST_URL 自动发现 → 检测后存入缓存
+
+    缓存过期或全部代理失效时自动重新发现。
+
     返回 (proxy_enabled, proxy_proxies_dict)。
     如果代理未启用或未配置，返回 (False, {})。
     """
     rows = fetch_all(
         "SELECT setting_key, setting_value FROM public.global_settings "
         "WHERE setting_key IN ('PROXY_ENABLED', 'PROXY_LIST', 'PROXY_LIST_URL', "
-        "'PROXY_VERIFY_COUNTRY', 'PROXY_MAX_TESTS', 'PROXY_TEST_URL', "
+        "'PROXY_VERIFY_COUNTRY', 'PROXY_MAX_TESTS', 'PROXY_REFRESH_HOURS', "
+        "'PROXY_VERIFIED_CACHE', 'PROXY_TEST_URL', "
         "'PROXY_DEAD_RETRY_MINUTES', 'PROXY_TIMEOUT')"
     )
     settings_map = {row["setting_key"]: row["setting_value"] for row in (rows or [])}
@@ -97,41 +105,105 @@ def _init_proxy_pool():
     if not proxy_enabled:
         return False, {}
 
+    test_url = settings_map.get("PROXY_TEST_URL", "https://www.ximalaya.com")
+    dead_retry_minutes = int(settings_map.get("PROXY_DEAD_RETRY_MINUTES", "5"))
+    timeout = int(settings_map.get("PROXY_TIMEOUT", "10"))
+
     proxy_list_raw = settings_map.get("PROXY_LIST", "")
     proxy_list = [line.strip() for line in proxy_list_raw.splitlines() if line.strip()]
 
-    # 当手动列表为空时，从 PROXY_LIST_URL 自动发现
-    if not proxy_list:
-        list_url = settings_map.get("PROXY_LIST_URL", "")
-        if list_url:
-            verify_country = settings_map.get("PROXY_VERIFY_COUNTRY", "中国")
-            max_tests = int(settings_map.get("PROXY_MAX_TESTS", "100"))
-            timeout = int(settings_map.get("PROXY_TIMEOUT", "10"))
-            logger.info(f"PROXY_LIST 为空，从 URL 自动发现代理: {list_url}")
-            proxy_list = auto_discover_proxies(
-                list_url=list_url,
-                verify_country=verify_country,
-                max_tests=max_tests,
-                timeout=min(timeout, 5),  # 国家检测用较短超时
-            )
-        if not proxy_list:
-            logger.warning("代理已启用但无可用代理（手动列表和自动发现均为空）")
+    # 模式1: 手动列表有值 → 直接用（不缓存）
+    if proxy_list:
+        init_pool(proxy_list=proxy_list, test_url=test_url,
+                  dead_retry_minutes=dead_retry_minutes, timeout=timeout)
+        pool = get_pool()
+        if pool:
+            stats = pool.health_check()
+            logger.info(f"代理池健康检测(手动列表): {stats['alive']}/{stats['total']} 可用")
+        return True, get_proxy()
+
+    # 模式2/3: 手动列表为空 → 读缓存或自动发现
+    refresh_hours = float(settings_map.get("PROXY_REFRESH_HOURS", "6"))
+    cached_proxies = None
+
+    cache_raw = settings_map.get("PROXY_VERIFIED_CACHE", "")
+    if cache_raw:
+        try:
+            cache = json.loads(cache_raw)
+            verified_at = datetime.fromisoformat(cache["verified_at"])
+            age_hours = (datetime.now() - verified_at).total_seconds() / 3600
+            if age_hours < refresh_hours and cache.get("proxies"):
+                cached_proxies = cache["proxies"]
+                logger.info(f"复用缓存代理: {len(cached_proxies)} 个 (验证于 {age_hours:.1f} 小时前, 刷新间隔 {refresh_hours}h)")
+        except Exception as e:
+            logger.warning(f"解析代理缓存失败: {e}")
+
+    # 缓存不存在或已过期 → 自动发现
+    if not cached_proxies:
+        cached_proxies = _auto_discover_and_cache(settings_map, timeout, refresh_hours)
+        if not cached_proxies:
             return False, {}
 
-    init_pool(
-        proxy_list=proxy_list,
-        test_url=settings_map.get("PROXY_TEST_URL", "https://www.ximalaya.com"),
-        dead_retry_minutes=int(settings_map.get("PROXY_DEAD_RETRY_MINUTES", "5")),
-        timeout=int(settings_map.get("PROXY_TIMEOUT", "10")),
-    )
+    init_pool(proxy_list=cached_proxies, test_url=test_url,
+              dead_retry_minutes=dead_retry_minutes, timeout=timeout)
 
-    # 启动时做一次健康检测
+    # 健康检测
     pool = get_pool()
     if pool:
         stats = pool.health_check()
         logger.info(f"代理池健康检测: {stats['alive']}/{stats['total']} 可用")
 
+        # 全部失效 → 清缓存重新发现
+        if stats["alive"] == 0 and stats["total"] > 0:
+            logger.warning("所有缓存代理已失效，重新发现...")
+            execute(
+                sql.SQL("UPDATE public.global_settings SET setting_value = '' WHERE setting_key = 'PROXY_VERIFIED_CACHE'"),
+                (),
+            )
+            new_proxies = _auto_discover_and_cache(settings_map, timeout, refresh_hours)
+            if new_proxies:
+                init_pool(proxy_list=new_proxies, test_url=test_url,
+                          dead_retry_minutes=dead_retry_minutes, timeout=timeout)
+                pool = get_pool()
+                if pool:
+                    stats = pool.health_check()
+                    logger.info(f"重新发现后健康检测: {stats['alive']}/{stats['total']} 可用")
+            else:
+                logger.warning("重新发现代理失败，使用直连")
+                return False, {}
+
     return True, get_proxy()
+
+
+def _auto_discover_and_cache(settings_map: dict, timeout: int, refresh_hours: float) -> list[str]:
+    """从 URL 自动发现中国代理，结果存入数据库缓存。"""
+    list_url = settings_map.get("PROXY_LIST_URL", "")
+    if not list_url:
+        logger.warning("PROXY_LIST 为空且未配置 PROXY_LIST_URL")
+        return []
+
+    verify_country = settings_map.get("PROXY_VERIFY_COUNTRY", "中国")
+    max_tests = int(settings_map.get("PROXY_MAX_TESTS", "100"))
+
+    logger.info(f"从 URL 自动发现代理: {list_url}")
+    proxies = auto_discover_proxies(
+        list_url=list_url,
+        verify_country=verify_country,
+        max_tests=max_tests,
+        timeout=min(timeout, 5),
+    )
+    if not proxies:
+        logger.warning("自动发现未找到可用中国代理")
+        return []
+
+    # 存入缓存
+    cache_json = json.dumps({"proxies": proxies, "verified_at": datetime.now().isoformat()})
+    execute(
+        sql.SQL("UPDATE public.global_settings SET setting_value = %s WHERE setting_key = 'PROXY_VERIFIED_CACHE'"),
+        (cache_json,),
+    )
+    logger.info(f"已验证代理已缓存: {len(proxies)} 个 (刷新间隔 {refresh_hours}h)")
+    return proxies
 
 
 # ═══════════════════════════════════════════════════════════

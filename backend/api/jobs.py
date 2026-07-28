@@ -20,6 +20,24 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["jobs"])
 
 
+def _get_effective_proxy_list(settings_map: dict) -> list[str]:
+    """获取生效的代理列表：优先手动 PROXY_LIST，为空则读 VPS 缓存的已验证代理。"""
+    manual = [line.strip() for line in settings_map.get("PROXY_LIST", "").splitlines() if line.strip()]
+    if manual:
+        return manual
+
+    # 读 VPS 缓存的已验证代理，分发给 Colab
+    import json
+    cache_raw = settings_map.get("PROXY_VERIFIED_CACHE", "")
+    if cache_raw:
+        try:
+            cache = json.loads(cache_raw)
+            return cache.get("proxies", [])
+        except Exception:
+            pass
+    return []
+
+
 # ═══════════════════════════════════════
 # 认领任务
 # ═══════════════════════════════════════
@@ -147,10 +165,11 @@ def api_config(worker_id: str = Query("")):
             "tg_serial_upload": settings_map.get("TG_SERIAL_UPLOAD", "true").lower() == "true",
             "tg_upload_interval": float(settings_map.get("TG_UPLOAD_INTERVAL", "3")),
             "proxy_enabled": settings_map.get("PROXY_ENABLED", "false").lower() == "true",
-            "proxy_list": [line.strip() for line in settings_map.get("PROXY_LIST", "").splitlines() if line.strip()],
+            "proxy_list": _get_effective_proxy_list(settings_map),
             "proxy_list_url": settings_map.get("PROXY_LIST_URL", ""),
             "proxy_verify_country": settings_map.get("PROXY_VERIFY_COUNTRY", "中国"),
             "proxy_max_tests": int(settings_map.get("PROXY_MAX_TESTS", "100")),
+            "proxy_refresh_hours": float(settings_map.get("PROXY_REFRESH_HOURS", "6")),
             "proxy_test_url": settings_map.get("PROXY_TEST_URL", "https://www.ximalaya.com"),
             "proxy_dead_retry_minutes": int(settings_map.get("PROXY_DEAD_RETRY_MINUTES", "5")),
             "proxy_timeout": int(settings_map.get("PROXY_TIMEOUT", "10")),

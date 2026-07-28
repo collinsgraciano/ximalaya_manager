@@ -33,9 +33,15 @@ PUBLIC_PATHS = (
 # Colab Worker API 路径前缀（使用 Worker Token 认证）
 WORKER_API_PATHS = (
     "/api/jobs/claim",
-    "/api/jobs/",
+    "/api/jobs/",  # 以 job_id 为路径参数的 Worker 端点（如 /api/jobs/{id}/chapter）
     "/api/config",
     "/api/worker/heartbeat",
+)
+
+# Worker API 中需要走 Web Cookie 认证的例外（管理端接口）
+WORKER_API_EXEMPTS = (
+    "/api/jobs/create",
+    "/api/jobs/create-batch",
 )
 
 
@@ -89,6 +95,9 @@ def _is_public(path: str) -> bool:
 
 def _is_worker_api(path: str) -> bool:
     """判断路径是否为 Colab Worker API。"""
+    for exempt in WORKER_API_EXEMPTS:
+        if path == exempt or path.startswith(exempt + "?"):
+            return False
     for prefix in WORKER_API_PATHS:
         if path.startswith(prefix):
             return True
