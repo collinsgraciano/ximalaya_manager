@@ -9,14 +9,14 @@ from psycopg.types.json import Jsonb
 from datetime import datetime
 
 from ..database import fetch_one, fetch_all, execute, execute_returning, execute_batch
-from ...pipeline.ximalaya_api import (
+from pipeline.ximalaya_api import (
     scrape_category as _scrape_category,
     get_all_tracks as _get_all_tracks,
     get_album_info as _get_album_info,
     normalize_album_record,
     CATEGORIES,
 )
-from ...pipeline.proxy_pool import init_pool, get_proxy, get_pool
+from pipeline.proxy_pool import init_pool, get_proxy, get_pool
 
 logger = logging.getLogger(__name__)
 
