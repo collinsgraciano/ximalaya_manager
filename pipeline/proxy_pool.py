@@ -1,8 +1,8 @@
-"""代理池 — 自动发现 + 按延迟排序 + 健康检测 + 死亡标记。
+"""代理池 — 自动发现 + 按延迟排序 + 健康检测 + 死亡踢出。
 
 VPS 采集端和 Colab 下载端共用。
 支持从 URL 自动获取代理列表并用 ip-api.com 筛选中国代理。
-优先使用延迟低速度快的代理，死亡代理超时后自动恢复并重新测速。
+优先使用延迟低速度快的代理，死亡代理直接踢出不再重试。
 """
 
 from __future__ import annotations
@@ -109,7 +109,7 @@ def auto_discover_proxies(
 
 
 class ProxyPool:
-    """代理池，按延迟排序优先使用最快代理。"""
+    """代理池，按延迟排序优先使用最快代理。死亡代理直接踢出。"""
 
     def __init__(
         self,
@@ -119,7 +119,6 @@ class ProxyPool:
         timeout: int = 10,
     ):
         self._test_url = test_url
-        self._dead_retry_sec = dead_retry_minutes * 60
         self._timeout = timeout
         self._lock = threading.Lock()
 
@@ -138,11 +137,11 @@ class ProxyPool:
         # proxy_url → 延迟秒数（-1 = 未测速）
         self._latency_map: dict[str, float] = {p: -1.0 for p in self._all_proxies}
 
-        # proxy_url → dead_until timestamp (0 = alive)
-        self._dead_map: dict[str, float] = {}
-
         # round-robin 计数器（在同延迟段内轮换）
         self._counter = 0
+
+        # 是否已做过 health_check
+        self._checked = False
 
         if self._all_proxies:
             logger.info(f"代理池初始化: {len(self._all_proxies)} 个代理")
@@ -150,36 +149,18 @@ class ProxyPool:
     def get(self) -> dict:
         """返回当前可用的最快代理，无可用时返回 {}（直连）。
 
-        从按延迟排序的列表中选取第一个未死亡的代理。
+        从按延迟排序的列表中 round-robin 选取。
         """
         if not self._sorted_proxies:
             return {}
 
         with self._lock:
-            now = time.time()
-            alive_proxies: list[str] = []
-
-            for proxy_url in self._sorted_proxies:
-                dead_until = self._dead_map.get(proxy_url, 0)
-                if dead_until and now < dead_until:
-                    continue  # 还在死亡期
-
-                # 复活了，清除死亡标记
-                if dead_until:
-                    self._dead_map.pop(proxy_url, None)
-                    logger.info(f"代理恢复: {proxy_url}")
-
-                alive_proxies.append(proxy_url)
-
-            if not alive_proxies:
-                logger.warning("所有代理均不可用，使用直连")
+            if not self._sorted_proxies:
                 return {}
 
-            # 在可用代理中，优先选延迟最低的
-            # 使用 counter 在相同优先级内做 round-robin，避免总打同一个
-            idx = self._counter % len(alive_proxies)
+            idx = self._counter % len(self._sorted_proxies)
             self._counter += 1
-            chosen = alive_proxies[idx]
+            chosen = self._sorted_proxies[idx]
             latency = self._latency_map.get(chosen, -1)
             latency_str = f"{latency:.2f}s" if latency > 0 else "未测速"
             logger.debug(f"选择代理: {chosen} (延迟 {latency_str})")
@@ -187,21 +168,28 @@ class ProxyPool:
             return build_proxies_dict(chosen)
 
     def mark_dead(self, proxy_url: str):
-        """标记代理临时不可用。"""
+        """将代理永久踢出代理池。"""
         with self._lock:
-            self._dead_map[proxy_url] = time.time() + self._dead_retry_sec
-            logger.warning(f"代理标记死亡: {proxy_url} ({self._dead_retry_sec // 60}分钟后重试)")
+            if proxy_url in self._all_proxies:
+                self._all_proxies.remove(proxy_url)
+            if proxy_url in self._sorted_proxies:
+                self._sorted_proxies.remove(proxy_url)
+            self._latency_map.pop(proxy_url, None)
+            remaining = len(self._sorted_proxies)
+            logger.warning(f"代理踢出: {proxy_url} (剩余 {remaining} 个)")
 
     def health_check(self) -> dict:
         """检测所有代理的连通性和延迟，按延迟重新排序。
 
-        返回状态摘要，包含每个代理的延迟信息。
+        只应在初始化时调用一次。死亡代理直接踢出。
         """
         results = {"total": len(self._all_proxies), "alive": 0, "dead": 0, "details": []}
         if not self._all_proxies:
             return results
 
-        for proxy_url in self._all_proxies:
+        dead_proxies: list[str] = []
+
+        for proxy_url in list(self._all_proxies):
             latency, ok = self._measure_latency(proxy_url)
             detail = {"proxy": proxy_url, "latency": latency, "ok": ok}
             results["details"].append(detail)
@@ -209,29 +197,35 @@ class ProxyPool:
             if ok:
                 results["alive"] += 1
                 with self._lock:
-                    self._dead_map.pop(proxy_url, None)
                     self._latency_map[proxy_url] = latency
                 logger.info(f"[健康检测] 代理可用: {proxy_url} (延迟 {latency:.2f}s)")
             else:
                 results["dead"] += 1
-                self.mark_dead(proxy_url)
+                dead_proxies.append(proxy_url)
                 with self._lock:
                     self._latency_map[proxy_url] = -1.0
 
-        # 按延迟升序排序（快的在前），未测速/死亡的排最后
+        # 踢出死亡代理
+        for p in dead_proxies:
+            self.mark_dead(p)
+
+        # 按延迟升序排序（快的在前）
         with self._lock:
             self._sorted_proxies = sorted(
-                self._all_proxies,
+                self._sorted_proxies,
                 key=lambda p: self._latency_map.get(p, 999) if self._latency_map.get(p, -1) > 0 else 999,
             )
+            self._checked = True
 
-        # 打印排序结果
-        sorted_str = " > ".join(
-            f"{p}({self._latency_map.get(p, -1):.2f}s)" if self._latency_map.get(p, -1) > 0
-            else f"{p}(dead)"
-            for p in self._sorted_proxies
-        )
-        logger.info(f"[健康检测] 代理延迟排序: {sorted_str}")
+        if self._sorted_proxies:
+            sorted_str = " > ".join(
+                f"{p}({self._latency_map.get(p, -1):.2f}s)"
+                for p in self._sorted_proxies
+                if self._latency_map.get(p, -1) > 0
+            )
+            logger.info(f"[健康检测] 可用代理排序: {sorted_str}")
+        else:
+            logger.warning("[健康检测] 无可用代理")
 
         return results
 
@@ -261,19 +255,13 @@ class ProxyPool:
 
     def stats(self) -> dict:
         """返回代理池当前状态摘要。"""
-        now = time.time()
         with self._lock:
-            alive = sum(
-                1 for p in self._all_proxies
-                if not self._dead_map.get(p, 0) or now >= self._dead_map.get(p, 0)
-            )
-            dead = len(self._all_proxies) - alive
-        return {
-            "total": len(self._all_proxies),
-            "alive": alive,
-            "dead": dead,
-            "sorted": list(self._sorted_proxies),
-        }
+            return {
+                "total": len(self._all_proxies),
+                "alive": len(self._sorted_proxies),
+                "dead": 0,
+                "sorted": list(self._sorted_proxies),
+            }
 
 
 # ═══════════════════════════════════════════════════════════

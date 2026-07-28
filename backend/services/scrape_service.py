@@ -88,10 +88,16 @@ def _init_proxy_pool():
     3. 从 PROXY_LIST_URL 自动发现 → 检测后存入缓存
 
     缓存过期或全部代理失效时自动重新发现。
+    代理池只初始化一次，后续调用直接复用。
 
     返回 (proxy_enabled, proxy_proxies_dict)。
     如果代理未启用或未配置，返回 (False, {})。
     """
+    # 已初始化则直接复用
+    existing_pool = get_pool()
+    if existing_pool is not None:
+        return True, get_proxy()
+
     rows = fetch_all(
         "SELECT setting_key, setting_value FROM public.global_settings "
         "WHERE setting_key IN ('PROXY_ENABLED', 'PROXY_LIST', 'PROXY_LIST_URL', "
@@ -147,7 +153,7 @@ def _init_proxy_pool():
     init_pool(proxy_list=cached_proxies, test_url=test_url,
               dead_retry_minutes=dead_retry_minutes, timeout=timeout)
 
-    # 健康检测
+    # 健康检测（仅一次）
     pool = get_pool()
     if pool:
         stats = pool.health_check()

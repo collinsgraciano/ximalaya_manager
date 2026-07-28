@@ -151,7 +151,11 @@ class ColabWorker:
         return {}
 
     def _init_proxy(self):
-        """根据配置初始化代理池。"""
+        """根据配置初始化代理池（仅一次，后续调用直接跳过）。"""
+        from pipeline.proxy_pool import get_pool
+        if get_pool() is not None:
+            return  # 已初始化，跳过
+
         if not self.config.get("proxy_enabled"):
             return
 
@@ -177,7 +181,7 @@ class ColabWorker:
             logger.warning("代理已启用但无可用代理（手动列表和自动发现均为空）")
             return
 
-        from pipeline.proxy_pool import init_pool, get_pool
+        from pipeline.proxy_pool import init_pool
         init_pool(
             proxy_list=proxy_list,
             test_url=self.config.get("proxy_test_url", "https://www.ximalaya.com"),
