@@ -12,6 +12,9 @@
         <button class="btn btn-outline-info" id="btn-scrape-all-tracks" onclick="startAllTracksScrape()">
             <i class="bi bi-list-ol"></i> 获取全部章节
         </button>
+        <button class="btn btn-outline-success" onclick="createAllJobs()">
+            <i class="bi bi-plus-circle"></i> 创建全部任务
+        </button>
         <button class="btn btn-outline-danger" onclick="deleteAllAlbums()">
             <i class="bi bi-trash"></i> 删除全部
         </button>
@@ -428,11 +431,31 @@ async function stopScrape() {
 async function checkScrapeStatus() {
     try {
         const data = await api('/api/albums/scrape/status');
-        if (data.active) {
+        if (data.status && data.status !== 'idle') {
             document.getElementById('scrape-progress-panel').style.display = '';
-            pollScrapeStatus();
+            if (data.active) {
+                pollScrapeStatus();
+            } else {
+                renderScrapeFinalState(data);
+            }
         }
     } catch (e) {}
+}
+
+function renderScrapeFinalState(data) {
+    document.getElementById('scrape-spinner').classList.remove('spinner-border', 'spinner-border-sm');
+    document.getElementById('scrape-spinner').innerHTML = data.status === 'done' ? '<i class="bi bi-check-circle text-success"></i>' : '<i class="bi bi-x-circle text-danger"></i>';
+    document.getElementById('scrape-stop-btn').style.display = 'none';
+    document.getElementById('scrape-progress-bar').classList.remove('progress-bar-animated');
+    document.getElementById('scrape-status-text').textContent = data.message || data.status;
+    document.getElementById('scrape-current-cat').textContent = data.current_category_name || '-';
+    document.getElementById('scrape-current-page').textContent = data.current_page || 0;
+    document.getElementById('scrape-total-albums').textContent = data.total_albums || 0;
+    document.getElementById('scrape-saved-albums').textContent = data.saved_albums || 0;
+    document.getElementById('scrape-new-this-page').textContent = data.new_this_page || 0;
+    const logEl = document.getElementById('scrape-log');
+    logEl.innerHTML = (data.log || []).map(l => `<div>${l}</div>`).join('');
+    logEl.scrollTop = logEl.scrollHeight;
 }
 
 async function deleteAlbum(bookId) {
@@ -443,6 +466,24 @@ async function deleteAlbum(bookId) {
         loadAlbums(currentPage);
     } catch (e) {
         showToast('删除失败: ' + e.message, 'danger');
+    }
+}
+
+// ═══════════════════════════════════════
+// 一键创建全部任务
+// ═══════════════════════════════════════
+
+async function createAllJobs() {
+    if (!confirm('确认为所有有待处理章节的专辑创建任务？')) return;
+    try {
+        const data = await api('/api/albums/create-all-jobs', { method: 'POST' });
+        if (data.ok) {
+            showToast(`已创建 ${data.count} 个任务`, 'success');
+        } else {
+            showToast('创建失败: ' + (data.error || '未知错误'), 'danger');
+        }
+    } catch (e) {
+        showToast('创建失败: ' + e.message, 'danger');
     }
 }
 
@@ -532,12 +573,33 @@ async function stopAllTracksScrape() {
     }
 }
 
+function renderTracksFinalState(data) {
+    document.getElementById('tracks-spinner').classList.remove('spinner-border', 'spinner-border-sm');
+    document.getElementById('tracks-spinner').innerHTML = data.status === 'done' ? '<i class="bi bi-check-circle text-success"></i>' : '<i class="bi bi-x-circle text-danger"></i>';
+    document.getElementById('tracks-stop-btn').style.display = 'none';
+    document.getElementById('tracks-progress-bar').classList.remove('progress-bar-animated');
+    document.getElementById('tracks-status-text').textContent = data.message || data.status;
+    document.getElementById('tracks-current-book').textContent = data.current_book || '-';
+    document.getElementById('tracks-total').textContent = data.total || 0;
+    document.getElementById('tracks-done').textContent = data.done || 0;
+    document.getElementById('tracks-failed').textContent = data.failed || 0;
+    const pct = data.total > 0 ? Math.round(((data.done + data.failed) / data.total) * 100) : 0;
+    document.getElementById('tracks-progress-bar').style.width = pct + '%';
+    const logEl = document.getElementById('tracks-log');
+    logEl.innerHTML = (data.log || []).map(l => `<div>${l}</div>`).join('');
+    logEl.scrollTop = logEl.scrollHeight;
+}
+
 async function checkTracksStatus() {
     try {
         const data = await api('/api/albums/scrape-all-tracks/status');
-        if (data.active) {
+        if (data.status && data.status !== 'idle') {
             document.getElementById('tracks-progress-panel').style.display = '';
-            pollTracksStatus();
+            if (data.active) {
+                pollTracksStatus();
+            } else {
+                renderTracksFinalState(data);
+            }
         }
     } catch (e) {}
 }

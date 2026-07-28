@@ -57,6 +57,33 @@ def create_jobs_batch(book_ids: list[str]) -> list[dict]:
     return results
 
 
+def create_jobs_for_all_pending() -> list[dict]:
+    """为所有有待处理章节且没有 pending/processing 任务的专辑创建任务。"""
+    # 找出有 pending 章节但没有 pending/processing 任务的专辑
+    rows = fetch_all(
+        sql.SQL("""
+            SELECT DISTINCT b.book_id
+            FROM public.books b
+            INNER JOIN public.audiobook_chapters c ON c.book_id = b.book_id
+            WHERE c.upload_status = 'pending'
+              AND NOT EXISTS (
+                  SELECT 1 FROM public.xm_jobs j
+                  WHERE j.book_id = b.book_id
+                    AND j.status IN ('pending', 'processing')
+              )
+            ORDER BY b.book_id
+        """),
+    )
+
+    results = []
+    for row in (rows or []):
+        job = create_job(row["book_id"])
+        if job:
+            results.append(job)
+
+    return results
+
+
 # ═══════════════════════════════════════════════════════════
 # 超时任务回收
 # ═══════════════════════════════════════════════════════════

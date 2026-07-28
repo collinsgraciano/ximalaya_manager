@@ -198,9 +198,12 @@ def upload_with_token_rotation(
 
     使用 round-robin 选择起始 Token，失败时尝试下一个。
     serial=True 时使用锁确保串行上传（避免 TG 限流）。
+
+    返回结果中额外包含 bot_token_idx: 实际成功上传的 Token 在原数组中的索引。
     """
     if not bot_tokens:
         return {"ok": False, "file_id": "", "message_id": 0, "bot_user_id": None,
+                "bot_token_idx": None,
                 "error": "无可用 Bot Token", "file_size": 0}
 
     # Round-robin 选择起始 Token 索引
@@ -211,6 +214,7 @@ def upload_with_token_rotation(
 
     # 重排 Token 列表，从 start_idx 开始
     ordered_tokens = bot_tokens[start_idx:] + bot_tokens[:start_idx]
+    used_idx = start_idx  # 实际使用的 Token 在原数组中的索引
 
     if serial:
         while not _UPLOAD_LOCK.acquire(timeout=2):
@@ -228,11 +232,13 @@ def upload_with_token_rotation(
                     file_path, token, chat_id, title, caption,
                 )
                 if result.get("ok"):
+                    used_idx = (start_idx + i) % len(bot_tokens)
                     break
 
         if result.get("ok") and interval > 0:
             time.sleep(interval)
 
+        result["bot_token_idx"] = used_idx
         return result
     finally:
         if serial:

@@ -276,6 +276,17 @@ def api_scrape_all_tracks_stop():
 
 
 # ═══════════════════════════════════════
+# 一键为所有待处理专辑创建任务
+# ═══════════════════════════════════════
+
+@router.post("/albums/create-all-jobs")
+def api_create_all_jobs():
+    from ..services.job_service import create_jobs_for_all_pending
+    jobs = create_jobs_for_all_pending()
+    return {"ok": True, "count": len(jobs), "jobs": jobs}
+
+
+# ═══════════════════════════════════════
 # 删除单个专辑
 # ═══════════════════════════════════════
 

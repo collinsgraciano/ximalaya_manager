@@ -308,7 +308,7 @@ class ColabWorker:
             return self._report_chapter(job_id, chapter_id, "uploaded",
                                        telegram_file_id=result.get("file_id", ""),
                                        telegram_message_id=result.get("message_id", 0),
-                                       telegram_bot_id=None,
+                                       telegram_bot_id=result.get("bot_token_idx"),
                                        telegram_bot_user_id=result.get("bot_user_id"))
 
         except Exception as e:
