@@ -213,13 +213,13 @@ def normalize_album_record(album: dict) -> dict:
 
 
 def _build_cover_url(album_id: Any, cover_path: str) -> str:
-    """构建封面图 URL。"""
+    """构建封面图 URL。fdfs.xmcdn.com 是正确的图片 CDN 域名。"""
     if cover_path:
         if cover_path.startswith("http"):
             return cover_path
-        return f"https://imagev2.ximalaya.com/{cover_path}"
+        return f"https://fdfs.xmcdn.com/{cover_path}"
     if album_id:
-        return f"https://imagev2.ximalaya.com/100/{album_id}.jpg"
+        return f"https://fdfs.xmcdn.com/group10/{album_id}.jpg"
     return ""
 
 

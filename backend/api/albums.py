@@ -257,8 +257,8 @@ def api_delete_all_albums():
 # ═══════════════════════════════════════
 
 @router.post("/albums/scrape-all-tracks")
-def api_scrape_all_tracks():
-    ok = start_scrape_all_tracks()
+def api_scrape_all_tracks(max_workers: int = Query(5, ge=1, le=20)):
+    ok = start_scrape_all_tracks(max_workers)
     if not ok:
         return {"ok": False, "error": "已有章节采集任务正在运行"}
     return {"ok": True, "message": "批量章节采集已启动"}

@@ -5,19 +5,25 @@
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-4">
     <h4 class="mb-0">专辑管理</h4>
-    <div class="btn-group">
-        <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#scrapeModal">
-            <i class="bi bi-cloud-download"></i> 采集分类
-        </button>
-        <button class="btn btn-outline-info" id="btn-scrape-all-tracks" onclick="startAllTracksScrape()">
-            <i class="bi bi-list-ol"></i> 获取全部章节
-        </button>
-        <button class="btn btn-outline-success" onclick="createAllJobs()">
-            <i class="bi bi-plus-circle"></i> 创建全部任务
-        </button>
-        <button class="btn btn-outline-danger" onclick="deleteAllAlbums()">
-            <i class="bi bi-trash"></i> 删除全部
-        </button>
+    <div class="d-flex align-items-center gap-2">
+        <div class="btn-group">
+            <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#scrapeModal">
+                <i class="bi bi-cloud-download"></i> 采集分类
+            </button>
+            <button class="btn btn-outline-info" id="btn-scrape-all-tracks" onclick="startAllTracksScrape()">
+                <i class="bi bi-list-ol"></i> 获取全部章节
+            </button>
+            <button class="btn btn-outline-success" onclick="createAllJobs()">
+                <i class="bi bi-plus-circle"></i> 创建全部任务
+            </button>
+            <button class="btn btn-outline-danger" onclick="deleteAllAlbums()">
+                <i class="bi bi-trash"></i> 删除全部
+            </button>
+        </div>
+        <div class="input-group input-group-sm" style="width: 120px;">
+            <span class="input-group-text">并发</span>
+            <input type="number" id="tracks-workers-input" class="form-control text-center" value="5" min="1" max="20" title="并发线程数">
+        </div>
     </div>
 </div>
 
@@ -76,6 +82,10 @@
         <div class="col-md-3">
             <small class="text-muted d-block">当前专辑</small>
             <span id="tracks-current-book">-</span>
+        </div>
+        <div class="col-md-1">
+            <small class="text-muted d-block">并发</small>
+            <span id="tracks-workers">-</span>
         </div>
         <div class="col-md-2">
             <small class="text-muted d-block">总数</small>
@@ -510,8 +520,9 @@ async function deleteAllAlbums() {
 let tracksPollTimer = null;
 
 async function startAllTracksScrape() {
+    const maxWorkers = parseInt(document.getElementById('tracks-workers-input')?.value) || 5;
     try {
-        const data = await api('/api/albums/scrape-all-tracks', { method: 'POST' });
+        const data = await api(`/api/albums/scrape-all-tracks?max_workers=${maxWorkers}`, { method: 'POST' });
         if (data.ok) {
             document.getElementById('tracks-progress-panel').style.display = '';
             pollTracksStatus();
@@ -530,6 +541,7 @@ async function pollTracksStatus() {
         const data = await api('/api/albums/scrape-all-tracks/status');
 
         document.getElementById('tracks-current-book').textContent = data.current_book || '-';
+        document.getElementById('tracks-workers').textContent = data.workers || '-';
         document.getElementById('tracks-total').textContent = data.total || 0;
         document.getElementById('tracks-done').textContent = data.done || 0;
         document.getElementById('tracks-failed').textContent = data.failed || 0;
@@ -580,6 +592,7 @@ function renderTracksFinalState(data) {
     document.getElementById('tracks-progress-bar').classList.remove('progress-bar-animated');
     document.getElementById('tracks-status-text').textContent = data.message || data.status;
     document.getElementById('tracks-current-book').textContent = data.current_book || '-';
+    document.getElementById('tracks-workers').textContent = data.workers || '-';
     document.getElementById('tracks-total').textContent = data.total || 0;
     document.getElementById('tracks-done').textContent = data.done || 0;
     document.getElementById('tracks-failed').textContent = data.failed || 0;

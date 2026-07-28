@@ -8,6 +8,7 @@ VPS 采集端和 Colab 下载端共用。
 from __future__ import annotations
 
 import time
+import random
 import logging
 import threading
 import requests
@@ -167,6 +168,15 @@ class ProxyPool:
 
             return build_proxies_dict(chosen)
 
+    def get_random(self) -> dict:
+        """随机返回一个可用代理，无可用时返回 {}（直连）。"""
+        with self._lock:
+            if not self._sorted_proxies:
+                return {}
+            chosen = random.choice(self._sorted_proxies)
+            logger.debug(f"随机选择代理: {chosen}")
+            return build_proxies_dict(chosen)
+
     def mark_dead(self, proxy_url: str):
         """将代理永久踢出代理池。"""
         with self._lock:
@@ -293,3 +303,10 @@ def get_proxy() -> dict:
     if _pool is None:
         return {}
     return _pool.get()
+
+
+def get_random_proxy() -> dict:
+    """便捷方法：从全局代理池随机获取一个可用代理。"""
+    if _pool is None:
+        return {}
+    return _pool.get_random()
