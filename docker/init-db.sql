@@ -1,0 +1,158 @@
+-- docker/init-db.sql
+-- 在 PostgreSQL 首次启动时自动执行
+
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+-- ═══════════════════════════════════════════════════════════
+-- 兼容表（与 yt_aduio_book_one_to_all_v2 完全一致）
+-- ═══════════════════════════════════════════════════════════
+
+-- 1. books — 专辑信息 (book_id = xm_{albumId})
+CREATE TABLE IF NOT EXISTS public.books (
+    book_id          text        PRIMARY KEY,
+    book_name        text,
+    author           text,
+    category         text,
+    total_chapters   integer,
+    book_data        jsonb,
+    tags             text[],
+    note             text,
+    status           text        DEFAULT '',
+    created_at       timestamptz DEFAULT now(),
+    updated_at       timestamptz DEFAULT now(),
+    book_status      varchar(50) DEFAULT 'pending'
+);
+ALTER TABLE public.books ADD COLUMN IF NOT EXISTS category text;
+ALTER TABLE public.books ADD COLUMN IF NOT EXISTS total_chapters integer;
+ALTER TABLE public.books ADD COLUMN IF NOT EXISTS note text;
+ALTER TABLE public.books ADD COLUMN IF NOT EXISTS book_status varchar(50) DEFAULT 'pending';
+CREATE INDEX IF NOT EXISTS idx_books_category    ON public.books(category);
+CREATE INDEX IF NOT EXISTS idx_books_status      ON public.books(status);
+CREATE INDEX IF NOT EXISTS idx_books_book_status ON public.books(book_status);
+CREATE INDEX IF NOT EXISTS idx_books_tags_gin    ON public.books USING gin(tags);
+CREATE INDEX IF NOT EXISTS idx_books_updated_at  ON public.books(updated_at DESC);
+
+-- 2. audiobook_chapters — 章节级 TG 缓存 (与参考项目完全一致)
+CREATE TABLE IF NOT EXISTS public.audiobook_chapters (
+    book_id               text NOT NULL,
+    chapter_id            text NOT NULL,
+    book_name             text,
+    chapter_name          text,
+    audio_url             text,
+    telegram_file_id      text,
+    telegram_message_id   bigint,
+    telegram_bot_id       integer,
+    telegram_bot_user_id  bigint,
+    upload_status         varchar(50) DEFAULT 'pending',
+    uploaded_at           timestamptz,
+    worker_id             varchar(100),
+    claimed_at            timestamptz,
+    error_message         text,
+    CONSTRAINT audiobook_chapters_pkey PRIMARY KEY (book_id, chapter_id)
+);
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS telegram_file_id text;
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS telegram_message_id bigint;
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS upload_status varchar(50) DEFAULT 'pending';
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS uploaded_at timestamptz;
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS telegram_bot_id integer;
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS telegram_bot_user_id bigint;
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS worker_id varchar(100);
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS claimed_at timestamptz;
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS error_message text;
+-- 本项目新增列
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS chapter_order integer;
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS duration integer;
+
+COMMENT ON COLUMN public.audiobook_chapters.telegram_bot_id IS '上传此文件的 Bot 编号（对应 BOT_TOKENS 数组索引）';
+COMMENT ON COLUMN public.audiobook_chapters.telegram_bot_user_id IS '上传此文件的 Bot 的永久 Telegram User ID';
+COMMENT ON COLUMN public.audiobook_chapters.worker_id IS '认领此章节的 Worker ID';
+COMMENT ON COLUMN public.audiobook_chapters.claimed_at IS 'Worker 认领此章节的时间戳';
+COMMENT ON COLUMN public.audiobook_chapters.error_message IS '上传失败时的错误信息记录';
+
+CREATE INDEX IF NOT EXISTS idx_audiobook_chapters_book_id ON public.audiobook_chapters(book_id);
+CREATE INDEX IF NOT EXISTS idx_audiobook_chapters_audio_url ON public.audiobook_chapters(book_id, audio_url);
+CREATE INDEX IF NOT EXISTS idx_audiobook_chapters_upload_status ON public.audiobook_chapters(upload_status);
+CREATE INDEX IF NOT EXISTS idx_chapters_book_status ON public.audiobook_chapters(book_id, upload_status);
+
+-- 3. global_settings — 全局共享设置
+CREATE TABLE IF NOT EXISTS public.global_settings (
+    setting_key   text PRIMARY KEY,
+    setting_value text NOT NULL DEFAULT '',
+    description   text,
+    is_secret     boolean DEFAULT false,
+    updated_at    timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE public.global_settings ALTER COLUMN is_secret DROP NOT NULL;
+
+-- ═══════════════════════════════════════════════════════════
+-- 本项目新增表
+-- ═══════════════════════════════════════════════════════════
+
+-- 4. xm_jobs — 任务队列（Colab Worker 认领模式）
+CREATE TABLE IF NOT EXISTS public.xm_jobs (
+    job_id        serial PRIMARY KEY,
+    job_type      varchar(50) NOT NULL DEFAULT 'process_album',
+    book_id       text,
+    book_name     text,
+    status        varchar(50) DEFAULT 'pending',
+    worker_id     varchar(100),
+    claimed_at    timestamptz,
+    result        jsonb,
+    error_message text,
+    retry_count   integer NOT NULL DEFAULT 0,
+    total_chapters integer NOT NULL DEFAULT 0,
+    done_chapters  integer NOT NULL DEFAULT 0,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    finished_at   timestamptz
+);
+CREATE INDEX IF NOT EXISTS idx_xm_jobs_status      ON public.xm_jobs(status);
+CREATE INDEX IF NOT EXISTS idx_xm_jobs_book        ON public.xm_jobs(book_id);
+CREATE INDEX IF NOT EXISTS idx_xm_jobs_created_at ON public.xm_jobs(created_at DESC);
+
+COMMENT ON TABLE public.xm_jobs IS 'Colab Worker 任务队列：通过 FOR UPDATE SKIP LOCKED 原子认领';
+COMMENT ON COLUMN public.xm_jobs.job_type IS 'process_album=处理专辑章节（下载→降噪→上传TG）';
+COMMENT ON COLUMN public.xm_jobs.status IS 'pending=待处理；processing=处理中；done=成功；failed=失败';
+
+-- 5. xm_worker_stats — Worker 业绩统计
+CREATE TABLE IF NOT EXISTS public.xm_worker_stats (
+    worker_id      varchar(100) PRIMARY KEY,
+    total_jobs     integer NOT NULL DEFAULT 0,
+    success_jobs   integer NOT NULL DEFAULT 0,
+    failed_jobs    integer NOT NULL DEFAULT 0,
+    total_chapters integer NOT NULL DEFAULT 0,
+    total_seconds  bigint NOT NULL DEFAULT 0,
+    last_job_at    timestamptz,
+    last_seen_at   timestamptz,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    updated_at     timestamptz NOT NULL DEFAULT now()
+);
+COMMENT ON TABLE public.xm_worker_stats IS 'Colab Worker 业绩统计';
+
+-- 6. xm_scrape_tasks — 采集任务记录
+CREATE TABLE IF NOT EXISTS public.xm_scrape_tasks (
+    task_id         serial PRIMARY KEY,
+    category        text NOT NULL,
+    category_name   text,
+    status          varchar(50) DEFAULT 'pending',
+    total_albums    integer NOT NULL DEFAULT 0,
+    processed_albums integer NOT NULL DEFAULT 0,
+    error_message   text,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    finished_at     timestamptz
+);
+CREATE INDEX IF NOT EXISTS idx_xm_scrape_tasks_status ON public.xm_scrape_tasks(status);
+
+-- ═══════════════════════════════════════════════════════════
+-- 初始化全局设置
+-- ═══════════════════════════════════════════════════════════
+
+INSERT INTO public.global_settings (setting_key, setting_value, description, is_secret) VALUES
+    ('TG_BOT_TOKEN', '', 'Telegram Bot Token（多个Token用英文逗号分隔，支持多Bot轮换上传）', true),
+    ('TG_CHAT_ID', '', 'Telegram Chat ID（音频上传目标聊天/频道ID）', false),
+    ('XM_COOKIE', '', '喜马拉雅 Cookie（用于下载付费专辑，需含 1&_token）', true),
+    ('ENABLE_DEEPFILTER', 'true', '是否启用 DeepFilter 降噪（Colab 端使用）', false),
+    ('DEEPFILTER_SEGMENT_MINUTES', '60', 'DeepFilter 音频分片时长（分钟）', false),
+    ('DOWNLOAD_INTERVAL', '1.5', '下载间隔秒数', false),
+    ('TG_SERIAL_UPLOAD', 'true', '是否串行上传到TG（避免限流）', false),
+    ('TG_UPLOAD_INTERVAL', '3', 'TG上传间隔秒数', false)
+ON CONFLICT (setting_key) DO NOTHING;

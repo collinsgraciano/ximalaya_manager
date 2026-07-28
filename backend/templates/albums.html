@@ -1,0 +1,282 @@
+{% extends "base.html" %}
+{% block title %}专辑管理 — 喜马拉雅有声书管理{% endblock %}
+{% block nav_albums %}active{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h4 class="mb-0">专辑管理</h4>
+    <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#scrapeModal">
+        <i class="bi bi-cloud-download"></i> 采集分类
+    </button>
+</div>
+
+<div class="card p-3 mb-3">
+    <div class="row g-2 align-items-end">
+        <div class="col-md-3">
+            <label class="form-label small">分类</label>
+            <select id="filter-category" class="form-select form-select-sm">
+                <option value="">全部分类</option>
+            </select>
+        </div>
+        <div class="col-md-3">
+            <label class="form-label small">状态</label>
+            <select id="filter-status" class="form-select form-select-sm">
+                <option value="">全部状态</option>
+                <option value="pending">待处理</option>
+                <option value="success">已完成</option>
+                <option value="failed">失败</option>
+            </select>
+        </div>
+        <div class="col-md-4">
+            <label class="form-label small">搜索</label>
+            <input type="text" id="filter-search" class="form-control form-control-sm" placeholder="专辑名 / 主播">
+        </div>
+        <div class="col-md-2">
+            <button class="btn btn-sm btn-outline-primary w-100" onclick="loadAlbums(1)">筛选</button>
+        </div>
+    </div>
+</div>
+
+<div class="card p-3">
+    <div class="table-responsive">
+        <table class="table table-sm table-hover">
+            <thead>
+                <tr><th>封面</th><th>标题</th><th>主播</th><th>分类</th><th>章节数</th><th>状态</th><th>操作</th></tr>
+            </thead>
+            <tbody id="albums-tbody">
+                <tr><td colspan="7" class="text-center text-muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+    <div class="d-flex justify-content-between align-items-center mt-2">
+        <span class="text-muted small" id="albums-info"></span>
+        <div id="albums-pagination"></div>
+    </div>
+</div>
+
+<!-- 采集模态框 -->
+<div class="modal fade" id="scrapeModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">采集分类专辑</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label">分类</label>
+                    <select id="scrape-category" class="form-select"></select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">排序</label>
+                    <select id="scrape-sort" class="form-select">
+                        <option value="default">默认</option>
+                        <option value="mostplays">最火</option>
+                        <option value="updates">最新</option>
+                    </select>
+                </div>
+                <div class="row g-2">
+                    <div class="col-6">
+                        <label class="form-label small">最大页数 (0=不限)</label>
+                        <input type="number" id="scrape-max-pages" class="form-control form-control-sm" value="0" min="0">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label small">最大专辑数 (0=不限)</label>
+                        <input type="number" id="scrape-max-albums" class="form-control form-control-sm" value="0" min="0">
+                    </div>
+                </div>
+                <div class="form-check mt-2">
+                    <input type="checkbox" class="form-check-input" id="scrape-free-only">
+                    <label class="form-check-label" for="scrape-free-only">仅免费专辑</label>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" id="scrape-btn" onclick="doScrape()">开始采集</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 编辑专辑模态框 -->
+<div class="modal fade" id="editModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">编辑专辑</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="edit-book-id">
+                <div class="mb-3">
+                    <label class="form-label">标题</label>
+                    <input type="text" id="edit-book-name" class="form-control">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">主播</label>
+                    <input type="text" id="edit-author" class="form-control">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">分类</label>
+                    <select id="edit-category" class="form-select"></select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">状态</label>
+                    <select id="edit-book-status" class="form-select">
+                        <option value="pending">待处理</option>
+                        <option value="success">已完成</option>
+                        <option value="failed">失败</option>
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">备注</label>
+                    <textarea id="edit-note" class="form-control" rows="3"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="saveAlbum()">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentPage = 1;
+let categoriesMap = {};
+
+async function loadCategories() {
+    const data = await api('/api/categories');
+    const cats = data.categories || {};
+    categoriesMap = cats;
+    const filterSel = document.getElementById('filter-category');
+    const scrapeSel = document.getElementById('scrape-category');
+    const editSel = document.getElementById('edit-category');
+    for (const [key, name] of Object.entries(cats)) {
+        filterSel.innerHTML += `<option value="${key}">${name}</option>`;
+        scrapeSel.innerHTML += `<option value="${key}">${name}</option>`;
+        editSel.innerHTML += `<option value="${key}">${name}</option>`;
+    }
+}
+
+async function loadAlbums(page) {
+    currentPage = page;
+    const category = document.getElementById('filter-category').value;
+    const status = document.getElementById('filter-status').value;
+    const search = document.getElementById('filter-search').value;
+
+    try {
+        const data = await api(`/api/albums?page=${page}&page_size=20&category=${category}&status=${status}&search=${encodeURIComponent(search)}`);
+        const albums = data.albums || [];
+        const html = albums.map(a => {
+            const cover = (a.book_data && a.book_data.albumCover) || '';
+            const coverHtml = cover ? `<img src="${cover}" class="album-cover">` : '<div class="album-cover bg-light"></div>';
+            return `<tr>
+                <td>${coverHtml}</td>
+                <td><a href="/albums/${a.book_id}">${a.book_name || '-'}</a></td>
+                <td>${a.author || '-'}</td>
+                <td>${categoriesMap[a.category] || a.category || '-'}</td>
+                <td>${a.total_chapters || 0}</td>
+                <td>${statusBadge(a.book_status)}</td>
+                <td>
+                    <button class="btn btn-sm btn-outline-primary py-0" onclick="openEdit('${a.book_id}', ${JSON.stringify(a).replace(/"/g, '&quot;')})"><i class="bi bi-pencil"></i></button>
+                    <button class="btn btn-sm btn-outline-danger py-0" onclick="deleteAlbum('${a.book_id}')"><i class="bi bi-trash"></i></button>
+                </td>
+            </tr>`;
+        }).join('');
+        document.getElementById('albums-tbody').innerHTML = html || '<tr><td colspan="7" class="text-center text-muted">暂无数据</td></tr>';
+        document.getElementById('albums-info').textContent = `共 ${data.total} 条，第 ${data.page}/${Math.ceil(data.total / data.page_size)} 页`;
+
+        const totalPages = Math.ceil(data.total / data.page_size);
+        let pagHtml = '';
+        if (page > 1) pagHtml += `<button class="btn btn-sm btn-outline-primary me-1" onclick="loadAlbums(${page-1})">上一页</button>`;
+        if (page < totalPages) pagHtml += `<button class="btn btn-sm btn-outline-primary" onclick="loadAlbums(${page+1})">下一页</button>`;
+        document.getElementById('albums-pagination').innerHTML = pagHtml;
+    } catch (e) {
+        showToast('加载失败: ' + e.message, 'danger');
+    }
+}
+
+function openEdit(bookId, album) {
+    document.getElementById('edit-book-id').value = bookId;
+    document.getElementById('edit-book-name').value = album.book_name || '';
+    document.getElementById('edit-author').value = album.author || '';
+    document.getElementById('edit-category').value = album.category || '';
+    document.getElementById('edit-book-status').value = album.book_status || 'pending';
+    document.getElementById('edit-note').value = album.note || '';
+    new bootstrap.Modal(document.getElementById('editModal')).show();
+}
+
+async function saveAlbum() {
+    const bookId = document.getElementById('edit-book-id').value;
+    const body = {
+        book_name: document.getElementById('edit-book-name').value,
+        author: document.getElementById('edit-author').value,
+        category: document.getElementById('edit-category').value,
+        book_status: document.getElementById('edit-book-status').value,
+        note: document.getElementById('edit-note').value,
+    };
+    try {
+        const data = await api(`/api/albums/${bookId}`, { method: 'PUT', body: JSON.stringify(body) });
+        if (data.ok) {
+            showToast('已保存', 'success');
+            bootstrap.Modal.getInstance(document.getElementById('editModal')).hide();
+            loadAlbums(currentPage);
+        } else {
+            showToast('保存失败: ' + (data.error || ''), 'danger');
+        }
+    } catch (e) {
+        showToast('保存失败: ' + e.message, 'danger');
+    }
+}
+
+async function doScrape() {
+    const category = document.getElementById('scrape-category').value;
+    if (!category) { showToast('请选择分类', 'warning'); return; }
+
+    const btn = document.getElementById('scrape-btn');
+    btn.disabled = true;
+    btn.textContent = '采集中...';
+
+    try {
+        const data = await api('/api/albums/scrape', {
+            method: 'POST',
+            body: JSON.stringify({
+                category,
+                max_pages: parseInt(document.getElementById('scrape-max-pages').value) || 0,
+                sort: document.getElementById('scrape-sort').value,
+                free_only: document.getElementById('scrape-free-only').checked,
+                max_albums: parseInt(document.getElementById('scrape-max-albums').value) || 0,
+            }),
+        });
+        if (data.ok) {
+            showToast(`采集完成: ${data.result.saved_albums} 个专辑`, 'success');
+            bootstrap.Modal.getInstance(document.getElementById('scrapeModal')).hide();
+            loadAlbums(1);
+        } else {
+            showToast('采集失败: ' + (data.error || '未知错误'), 'danger');
+        }
+    } catch (e) {
+        showToast('采集失败: ' + e.message, 'danger');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '开始采集';
+    }
+}
+
+async function deleteAlbum(bookId) {
+    if (!confirm('确认删除此专辑及其所有章节？')) return;
+    try {
+        await api(`/api/albums/${bookId}`, { method: 'DELETE' });
+        showToast('已删除', 'success');
+        loadAlbums(currentPage);
+    } catch (e) {
+        showToast('删除失败: ' + e.message, 'danger');
+    }
+}
+
+loadCategories().then(() => loadAlbums(1));
+</script>
+{% endblock %}

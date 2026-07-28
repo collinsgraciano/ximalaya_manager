@@ -1,0 +1,218 @@
+{% extends "base.html" %}
+{% block title %}全局设置 — 喜马拉雅有声书管理{% endblock %}
+{% block nav_settings %}active{% endblock %}
+
+{% block content %}
+<h4 class="mb-4">全局设置</h4>
+
+<ul class="nav nav-tabs mb-3" role="tablist">
+    <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-settings">设置项</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-colab">Colab 配置预览</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-conn">连接信息</button></li>
+</ul>
+
+<div class="tab-content">
+    <!-- 设置项 -->
+    <div class="tab-pane fade show active" id="tab-settings">
+        <div class="card p-4">
+            <form id="settings-form">
+                <div id="settings-fields">
+                    <div class="text-center text-muted">加载中...</div>
+                </div>
+                <div class="mt-4 d-flex gap-2">
+                    <button type="button" class="btn btn-primary" onclick="saveSettings()">保存全部</button>
+                    <button type="button" class="btn btn-outline-secondary" onclick="addSettingRow()">+ 新增设置</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Colab 配置预览 -->
+    <div class="tab-pane fade" id="tab-colab">
+        <div class="card p-4">
+            <p class="text-muted small">以下为 Colab Worker 通过 <code>GET /api/config</code> 获取到的配置内容（敏感信息已脱敏）：</p>
+            <div id="config-preview" class="text-center text-muted">点击下方按钮预览...</div>
+            <button class="btn btn-outline-primary mt-2" onclick="previewConfig()">刷新配置预览</button>
+        </div>
+    </div>
+
+    <!-- 连接信息 -->
+    <div class="tab-pane fade" id="tab-conn">
+        <div class="card p-4">
+            <h6 class="mb-3">Colab Worker 连接信息</h6>
+            <table class="table table-sm">
+                <tr><td style="width:200px">VPS API 地址</td><td><code id="vps-url"></code></td></tr>
+                <tr><td>Worker 认证 Token</td><td><code id="worker-token-display"></code></td></tr>
+            </table>
+            <h6 class="mt-4 mb-2">API 端点</h6>
+            <table class="table table-sm">
+                <tr><td>认领任务</td><td><code>GET /api/jobs/claim?worker_id=xxx&worker_token=xxx</code></td></tr>
+                <tr><td>上报章节</td><td><code>POST /api/jobs/{job_id}/chapter</code></td></tr>
+                <tr><td>任务完成</td><td><code>POST /api/jobs/{job_id}/complete</code></td></tr>
+                <tr><td>任务失败</td><td><code>POST /api/jobs/{job_id}/fail</code></td></tr>
+                <tr><td>获取配置</td><td><code>GET /api/config?worker_id=xxx&worker_token=xxx</code></td></tr>
+                <tr><td>心跳</td><td><code>POST /api/worker/heartbeat?worker_id=xxx&worker_token=xxx</code></td></tr>
+            </table>
+            <h6 class="mt-4 mb-2">Colab 快速启动</h6>
+            <pre class="bg-dark text-light p-3 rounded small"><code>!pip install requests pycryptodome tqdm pydub
+
+# 克隆项目（或上传 ximalaya_colab_worker.py + pipeline/ 目录）
+!python colab/ximalaya_colab_worker.py \
+    --vps-url <span id="colab-url"></span> \
+    --worker-id colab_001 \
+    --worker-token YOUR_TOKEN \
+    --install-deps</code></pre>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const SETTING_GROUPS = {
+    'Telegram': ['TG_BOT_TOKEN', 'TG_CHAT_ID', 'TG_SERIAL_UPLOAD', 'TG_UPLOAD_INTERVAL'],
+    '喜马拉雅': ['XM_COOKIE', 'DOWNLOAD_INTERVAL'],
+    'DeepFilter': ['ENABLE_DEEPFILTER', 'DEEPFILTER_SEGMENT_MINUTES'],
+};
+
+async function loadSettings() {
+    try {
+        const data = await api('/api/settings');
+        const settings = data.settings || [];
+
+        // 按分组渲染
+        let html = '';
+        const grouped = {};
+        const used = new Set();
+
+        for (const [groupName, keys] of Object.entries(SETTING_GROUPS)) {
+            const items = settings.filter(s => keys.includes(s.setting_key));
+            if (items.length === 0) continue;
+            items.forEach(s => used.add(s.setting_key));
+            html += renderSettingGroup(groupName, items);
+        }
+
+        // 其他未分组
+        const others = settings.filter(s => !used.has(s.setting_key));
+        if (others.length > 0) {
+            html += renderSettingGroup('其他', others);
+        }
+
+        document.getElementById('settings-fields').innerHTML = html || '<div class="text-muted">暂无设置项</div>';
+    } catch (e) {
+        showToast('加载失败: ' + e.message, 'danger');
+    }
+}
+
+function renderSettingGroup(name, items) {
+    const fields = items.map(s => {
+        const isSecret = s.is_secret;
+        const val = s.setting_value || '';
+        const inputType = isSecret ? 'password' : 'text';
+        return `<div class="mb-2">
+            <label class="form-label small mb-1">
+                ${s.setting_key}
+                ${isSecret ? ' <i class="bi bi-lock-fill text-muted"></i>' : ''}
+                ${s.description ? `<span class="text-muted"> — ${s.description}</span>` : ''}
+            </label>
+            <div class="input-group input-group-sm">
+                <input type="${inputType}" class="form-control" data-key="${s.setting_key}" value="${val}" placeholder="${s.description || ''}">
+                ${isSecret ? '<button class="btn btn-outline-secondary" type="button" onclick="togglePassword(this)"><i class="bi bi-eye"></i></button>' : ''}
+            </div>
+        </div>`;
+    }).join('');
+    return `<div class="mb-4"><h6 class="border-bottom pb-2">${name}</h6>${fields}</div>`;
+}
+
+function togglePassword(btn) {
+    const input = btn.parentElement.querySelector('input');
+    if (input.type === 'password') {
+        input.type = 'text';
+        btn.innerHTML = '<i class="bi bi-eye-slash"></i>';
+    } else {
+        input.type = 'password';
+        btn.innerHTML = '<i class="bi bi-eye"></i>';
+    }
+}
+
+async function saveSettings() {
+    const inputs = document.querySelectorAll('#settings-fields input[data-key]');
+    let saved = 0;
+    let errors = 0;
+    for (const input of inputs) {
+        const key = input.dataset.key;
+        const value = input.value;
+        if (value === '******') continue;
+        try {
+            await api('/api/settings', {
+                method: 'POST',
+                body: JSON.stringify({ setting_key: key, setting_value: value }),
+            });
+            saved++;
+        } catch (e) {
+            errors++;
+            showToast(`保存 ${key} 失败: ${e.message}`, 'danger');
+        }
+    }
+    if (saved > 0 && errors === 0) {
+        showToast(`已保存 ${saved} 项设置`, 'success');
+        loadSettings();
+    } else if (saved > 0) {
+        showToast(`已保存 ${saved} 项，${errors} 项失败`, 'warning');
+    }
+}
+
+function addSettingRow() {
+    const key = prompt('输入设置项名称 (如 MY_NEW_SETTING):');
+    if (!key) return;
+    const desc = prompt('输入描述 (可选):') || '';
+    const html = `<div class="mb-2">
+        <label class="form-label small mb-1">${key} <span class="text-muted">— ${desc}</span></label>
+        <div class="input-group input-group-sm">
+            <input type="text" class="form-control" data-key="${key}" value="" placeholder="${desc}">
+        </div>
+    </div>`;
+    const container = document.getElementById('settings-fields');
+    const otherGroup = container.querySelector('h6:last-of-type');
+    if (otherGroup && otherGroup.textContent === '其他') {
+        otherGroup.parentElement.insertAdjacentHTML('beforeend', html);
+    } else {
+        container.insertAdjacentHTML('beforeend', `<div class="mb-4"><h6 class="border-bottom pb-2">其他</h6>${html}</div>`);
+    }
+}
+
+async function previewConfig() {
+    try {
+        const data = await api('/api/settings');
+        const settings = (data.settings || []).filter(s => s.setting_value && s.setting_value !== '******');
+        // 模拟 /api/config 的返回
+        const cfg = {
+            tg_bot_tokens: (settings.find(s => s.setting_key === 'TG_BOT_TOKEN')?.setting_value || '')
+                .split(',').map(t => t.trim()).filter(Boolean).length + ' 个 Token',
+            tg_chat_id: settings.find(s => s.setting_key === 'TG_CHAT_ID')?.setting_value || '(空)',
+            xm_cookie: settings.find(s => s.setting_key === 'XM_COOKIE')?.setting_value ? '已配置 (' + settings.find(s => s.setting_key === 'XM_COOKIE').setting_value.length + ' 字符)' : '(空)',
+            enable_deepfilter: settings.find(s => s.setting_key === 'ENABLE_DEEPFILTER')?.setting_value || 'true',
+            deepfilter_segment_minutes: parseInt(settings.find(s => s.setting_key === 'DEEPFILTER_SEGMENT_MINUTES')?.setting_value || '60'),
+            download_interval: parseFloat(settings.find(s => s.setting_key === 'DOWNLOAD_INTERVAL')?.setting_value || '1.5'),
+            tg_serial_upload: settings.find(s => s.setting_key === 'TG_SERIAL_UPLOAD')?.setting_value || 'true',
+            tg_upload_interval: parseFloat(settings.find(s => s.setting_key === 'TG_UPLOAD_INTERVAL')?.setting_value || '3'),
+        };
+        let html = '<table class="table table-sm"><tbody>';
+        for (const [k, v] of Object.entries(cfg)) {
+            html += `<tr><td style="width:280px"><code>${k}</code></td><td>${v}</td></tr>`;
+        }
+        html += '</tbody></table>';
+        html += '<div class="alert alert-info small mt-2"><i class="bi bi-info-circle"></i> Colab Worker 会在认领任务时自动获取这些配置，无需手动传递。</div>';
+        document.getElementById('config-preview').innerHTML = html;
+    } catch (e) {
+        showToast('预览失败: ' + e.message, 'danger');
+    }
+}
+
+document.getElementById('vps-url').textContent = window.location.origin;
+document.getElementById('colab-url').textContent = window.location.origin;
+document.getElementById('worker-token-display').textContent = '（见 .env 中 WORKER_AUTH_TOKEN）';
+
+loadSettings();
+</script>
+{% endblock %}

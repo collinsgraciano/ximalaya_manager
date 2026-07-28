@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}仪表盘 — 喜马拉雅有声书管理{% endblock %}
+{% block nav_dashboard %}active{% endblock %}
+
+{% block content %}
+<h4 class="mb-4">仪表盘</h4>
+
+<div class="row g-3 mb-4">
+    <div class="col-md-3">
+        <div class="card stat-card p-3">
+            <div class="text-muted small">总专辑数</div>
+            <div class="fs-3 fw-bold" id="stat-albums">-</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card p-3" style="border-left-color: #198754;">
+            <div class="text-muted small">已上传章节</div>
+            <div class="fs-3 fw-bold text-success" id="stat-uploaded">-</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card p-3" style="border-left-color: #6c757d;">
+            <div class="text-muted small">待处理章节</div>
+            <div class="fs-3 fw-bold text-secondary" id="stat-pending">-</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card p-3" style="border-left-color: #dc3545;">
+            <div class="text-muted small">待处理任务</div>
+            <div class="fs-3 fw-bold text-danger" id="stat-jobs-pending">-</div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3">
+    <div class="col-md-8">
+        <div class="card p-3">
+            <h6 class="mb-3">最近任务</h6>
+            <div class="table-responsive">
+                <table class="table table-sm table-hover">
+                    <thead>
+                        <tr><th>ID</th><th>专辑</th><th>状态</th><th>进度</th><th>Worker</th><th>时间</th></tr>
+                    </thead>
+                    <tbody id="recent-jobs">
+                        <tr><td colspan="6" class="text-center text-muted">加载中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card p-3">
+            <h6 class="mb-3">分类统计</h6>
+            <div id="category-stats" class="text-muted">加载中...</div>
+        </div>
+        <div class="card p-3 mt-3">
+            <h6 class="mb-3">活跃 Worker</h6>
+            <div class="fs-4 fw-bold" id="active-workers">-</div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadDashboard() {
+    try {
+        const data = await api('/api/dashboard/stats');
+        document.getElementById('stat-albums').textContent = data.albums.total;
+        document.getElementById('stat-uploaded').textContent = data.chapters.uploaded;
+        document.getElementById('stat-pending').textContent = data.chapters.pending;
+        document.getElementById('stat-jobs-pending').textContent = data.jobs.pending;
+        document.getElementById('active-workers').textContent = data.workers.active;
+
+        // 最近任务
+        const jobsHtml = (data.recent_jobs || []).map(j => `
+            <tr>
+                <td>${j.job_id}</td>
+                <td>${j.book_name || j.book_id || '-'}</td>
+                <td>${statusBadge(j.status)}</td>
+                <td>${j.done_chapters}/${j.total_chapters}</td>
+                <td>${j.worker_id ? j.worker_id.substring(0, 12) : '-'}</td>
+                <td>${fmtTime(j.created_at)}</td>
+            </tr>
+        `).join('');
+        document.getElementById('recent-jobs').innerHTML = jobsHtml || '<tr><td colspan="6" class="text-center text-muted">暂无任务</td></tr>';
+
+        // 分类统计
+        const catHtml = (data.category_stats || []).map(c => `
+            <div class="d-flex justify-content-between mb-1">
+                <span>${c.category || '未分类'}</span>
+                <span class="badge bg-primary">${c.album_count}</span>
+            </div>
+        `).join('');
+        document.getElementById('category-stats').innerHTML = catHtml || '<span class="text-muted">暂无数据</span>';
+    } catch (e) {
+        showToast('加载失败: ' + e.message, 'danger');
+    }
+}
+loadDashboard();
+setInterval(loadDashboard, 10000);
+</script>
+{% endblock %}

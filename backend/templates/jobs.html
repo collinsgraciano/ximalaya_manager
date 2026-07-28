@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block title %}任务队列 — 喜马拉雅有声书管理{% endblock %}
+{% block nav_jobs %}active{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h4 class="mb-0">任务队列</h4>
+    <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createJobModal">
+        <i class="bi bi-plus-circle"></i> 创建任务
+    </button>
+</div>
+
+<div class="card p-3 mb-3">
+    <div class="d-flex gap-2 align-items-center">
+        <select id="job-status-filter" class="form-select form-select-sm" style="width:auto;" onchange="loadJobs(1)">
+            <option value="">全部状态</option>
+            <option value="pending">待处理</option>
+            <option value="processing">处理中</option>
+            <option value="done">完成</option>
+            <option value="failed">失败</option>
+        </select>
+    </div>
+</div>
+
+<div class="card p-3">
+    <div class="table-responsive">
+        <table class="table table-sm table-hover">
+            <thead>
+                <tr><th>ID</th><th>专辑</th><th>类型</th><th>状态</th><th>进度</th><th>Worker</th><th>认领时间</th><th>完成时间</th></tr>
+            </thead>
+            <tbody id="jobs-tbody">
+                <tr><td colspan="8" class="text-center text-muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+    <div class="d-flex justify-content-between align-items-center mt-2">
+        <span class="text-muted small" id="jobs-info"></span>
+        <div id="jobs-pagination"></div>
+    </div>
+</div>
+
+<!-- 创建任务模态框 -->
+<div class="modal fade" id="createJobModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">创建处理任务</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label">专辑 ID (xm_格式)</label>
+                    <input type="text" id="create-book-id" class="form-control" placeholder="xm_47517749">
+                </div>
+                <div class="text-muted small">提示：在专辑管理页面点击专辑标题，URL 中的 book_id 即为专辑 ID。</div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="doCreateJob()">创建</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentJobPage = 1;
+
+async function loadJobs(page) {
+    currentJobPage = page;
+    const status = document.getElementById('job-status-filter').value;
+    try {
+        const data = await api(`/api/jobs?page=${page}&page_size=20&status=${status}`);
+        const jobs = data.jobs || [];
+        const html = jobs.map(j => {
+            const progress = j.total_chapters > 0 ? `${j.done_chapters}/${j.total_chapters}` : '-';
+            return `<tr>
+                <td>${j.job_id}</td>
+                <td>${j.book_name || j.book_id || '-'}</td>
+                <td>${j.job_type || '-'}</td>
+                <td>${statusBadge(j.status)}</td>
+                <td>${progress}</td>
+                <td>${j.worker_id ? j.worker_id.substring(0, 12) : '-'}</td>
+                <td>${fmtTime(j.claimed_at)}</td>
+                <td>${fmtTime(j.finished_at)}</td>
+            </tr>`;
+        }).join('');
+        document.getElementById('jobs-tbody').innerHTML = html || '<tr><td colspan="8" class="text-center text-muted">暂无任务</td></tr>';
+        document.getElementById('jobs-info').textContent = `共 ${data.total} 条，第 ${data.page}/${Math.ceil(data.total / data.page_size)} 页`;
+
+        const totalPages = Math.ceil(data.total / data.page_size);
+        let pagHtml = '';
+        if (page > 1) pagHtml += `<button class="btn btn-sm btn-outline-primary me-1" onclick="loadJobs(${page-1})">上一页</button>`;
+        if (page < totalPages) pagHtml += `<button class="btn btn-sm btn-outline-primary" onclick="loadJobs(${page+1})">下一页</button>`;
+        document.getElementById('jobs-pagination').innerHTML = pagHtml;
+    } catch (e) {
+        showToast('加载失败: ' + e.message, 'danger');
+    }
+}
+
+async function doCreateJob() {
+    const bookId = document.getElementById('create-book-id').value.trim();
+    if (!bookId) { showToast('请输入专辑 ID', 'warning'); return; }
+    try {
+        const data = await api('/api/jobs/create', {
+            method: 'POST',
+            body: JSON.stringify({ book_id: bookId }),
+        });
+        if (data.ok) {
+            showToast(`任务已创建: #${data.job.job_id}`, 'success');
+            bootstrap.Modal.getInstance(document.getElementById('createJobModal')).hide();
+            loadJobs(1);
+        } else {
+            showToast('创建失败: ' + (data.error || '未知错误'), 'danger');
+        }
+    } catch (e) {
+        showToast('创建失败: ' + e.message, 'danger');
+    }
+}
+
+loadJobs(1);
+setInterval(() => loadJobs(currentJobPage), 10000);
+</script>
+{% endblock %}

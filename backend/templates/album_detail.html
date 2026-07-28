@@ -1,0 +1,321 @@
+{% extends "base.html" %}
+{% block title %}专辑详情 — 喜马拉雅有声书管理{% endblock %}
+{% block nav_albums %}active{% endblock %}
+
+{% block content %}
+<div id="album-info" class="mb-4">
+    <div class="card p-3">
+        <div class="d-flex align-items-start">
+            <div class="me-3"><div id="album-cover" style="width:80px;height:80px;background:#eee;border-radius:8px;"></div></div>
+            <div class="flex-grow-1">
+                <h5 id="album-title" class="mb-1">加载中...</h5>
+                <div class="text-muted small mb-1">
+                    <span id="album-author"></span> ·
+                    <span id="album-category"></span> ·
+                    <span id="album-chapters"></span> 章
+                </div>
+                <div id="album-intro" class="text-muted small"></div>
+                <div id="album-note" class="small mt-1"></div>
+            </div>
+            <div class="d-flex flex-column gap-2">
+                <button class="btn btn-sm btn-outline-secondary" onclick="openEditAlbum()"><i class="bi bi-pencil"></i> 编辑</button>
+                <button class="btn btn-sm btn-outline-primary" id="btn-scrape-tracks" onclick="scrapeTracks()">获取章节</button>
+                <button class="btn btn-sm btn-primary" id="btn-create-job" onclick="createJob()">创建任务</button>
+                <button class="btn btn-sm btn-outline-warning" id="btn-reset" onclick="resetChapters()">重置章节</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card p-3">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h6 class="mb-0">章节列表</h6>
+        <div class="d-flex gap-2">
+            <select id="chapter-status-filter" class="form-select form-select-sm" style="width:auto;" onchange="loadChapters(1)">
+                <option value="">全部状态</option>
+                <option value="pending">待处理</option>
+                <option value="uploaded">已上传</option>
+                <option value="failed">失败</option>
+            </select>
+        </div>
+    </div>
+    <div class="table-responsive">
+        <table class="table table-sm table-hover">
+            <thead>
+                <tr><th>#</th><th>标题</th><th>时长</th><th>状态</th><th>TG file_id</th><th>Worker</th><th>操作</th></tr>
+            </thead>
+            <tbody id="chapters-tbody">
+                <tr><td colspan="7" class="text-center text-muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+    <div class="d-flex justify-content-between align-items-center mt-2">
+        <span class="text-muted small" id="chapters-info"></span>
+        <div id="chapters-pagination"></div>
+    </div>
+</div>
+
+<!-- 编辑专辑模态框 -->
+<div class="modal fade" id="editAlbumModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">编辑专辑</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label">标题</label>
+                    <input type="text" id="modal-book-name" class="form-control">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">主播</label>
+                    <input type="text" id="modal-author" class="form-control">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">分类</label>
+                    <select id="modal-category" class="form-select"></select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">状态</label>
+                    <select id="modal-book-status" class="form-select">
+                        <option value="pending">待处理</option>
+                        <option value="success">已完成</option>
+                        <option value="failed">失败</option>
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">备注</label>
+                    <textarea id="modal-note" class="form-control" rows="3"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="saveAlbumEdit()">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 编辑章节模态框 -->
+<div class="modal fade" id="editChapterModal" tabindex="-1">
+    <div class="modal-dialog modal-sm">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">编辑章节</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="edit-chapter-id">
+                <div class="mb-3">
+                    <label class="form-label">章节标题</label>
+                    <input type="text" id="edit-chapter-name" class="form-control">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">状态</label>
+                    <select id="edit-chapter-status" class="form-select">
+                        <option value="pending">待处理</option>
+                        <option value="uploaded">已上传</option>
+                        <option value="failed">失败</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="saveChapterEdit()">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const bookId = '{{ book_id }}';
+let currentChapterPage = 1;
+let albumData = null;
+let categoriesMap = {};
+
+async function loadCategories() {
+    const data = await api('/api/categories');
+    categoriesMap = data.categories || {};
+}
+
+async function loadAlbum() {
+    try {
+        const data = await api(`/api/albums/${bookId}`);
+        if (!data.ok) { showToast('专辑不存在', 'danger'); return; }
+        albumData = data.album;
+        const a = albumData;
+        document.getElementById('album-title').textContent = a.book_name || '-';
+        document.getElementById('album-author').textContent = a.author || '-';
+        document.getElementById('album-category').textContent = categoriesMap[a.category] || a.category || '-';
+        document.getElementById('album-chapters').textContent = a.total_chapters || 0;
+        document.getElementById('album-intro').textContent = (a.book_data && a.book_data.intro) || '';
+        if (a.note) {
+            document.getElementById('album-note').innerHTML = `<span class="badge bg-info">备注: ${a.note}</span>`;
+        }
+        const cover = a.book_data && a.book_data.albumCover;
+        if (cover) {
+            document.getElementById('album-cover').innerHTML = `<img src="${cover}" style="width:80px;height:80px;object-fit:cover;border-radius:8px;">`;
+        }
+        document.getElementById('btn-create-job').disabled = (a.book_status === 'success');
+    } catch (e) {
+        showToast('加载失败: ' + e.message, 'danger');
+    }
+}
+
+function openEditAlbum() {
+    if (!albumData) return;
+    document.getElementById('modal-book-name').value = albumData.book_name || '';
+    document.getElementById('modal-author').value = albumData.author || '';
+    // 填充分类下拉
+    const sel = document.getElementById('modal-category');
+    sel.innerHTML = '';
+    for (const [key, name] of Object.entries(categoriesMap)) {
+        sel.innerHTML += `<option value="${key}" ${key === albumData.category ? 'selected' : ''}>${name}</option>`;
+    }
+    document.getElementById('modal-book-status').value = albumData.book_status || 'pending';
+    document.getElementById('modal-note').value = albumData.note || '';
+    new bootstrap.Modal(document.getElementById('editAlbumModal')).show();
+}
+
+async function saveAlbumEdit() {
+    const body = {
+        book_name: document.getElementById('modal-book-name').value,
+        author: document.getElementById('modal-author').value,
+        category: document.getElementById('modal-category').value,
+        book_status: document.getElementById('modal-book-status').value,
+        note: document.getElementById('modal-note').value,
+    };
+    try {
+        const data = await api(`/api/albums/${bookId}`, { method: 'PUT', body: JSON.stringify(body) });
+        if (data.ok) {
+            showToast('已保存', 'success');
+            bootstrap.Modal.getInstance(document.getElementById('editAlbumModal')).hide();
+            loadAlbum();
+        } else {
+            showToast('保存失败: ' + (data.error || ''), 'danger');
+        }
+    } catch (e) {
+        showToast('保存失败: ' + e.message, 'danger');
+    }
+}
+
+async function loadChapters(page) {
+    currentChapterPage = page;
+    const status = document.getElementById('chapter-status-filter').value;
+    try {
+        const data = await api(`/api/albums/${bookId}/chapters?page=${page}&page_size=50&status=${status}`);
+        const chapters = data.chapters || [];
+        const html = chapters.map(c => {
+            const dur = c.duration ? `${Math.floor(c.duration/60)}:${String(c.duration%60).padStart(2,'0')}` : '-';
+            const fileId = c.telegram_file_id ? c.telegram_file_id.substring(0, 20) + '...' : '-';
+            return `<tr>
+                <td>${c.chapter_order || '-'}</td>
+                <td>${c.chapter_name || '-'}</td>
+                <td>${dur}</td>
+                <td>${statusBadge(c.upload_status)}</td>
+                <td class="small text-muted">${fileId}</td>
+                <td>${c.worker_id ? c.worker_id.substring(0, 12) : '-'}</td>
+                <td><button class="btn btn-sm btn-outline-primary py-0" onclick="openEditChapter('${c.chapter_id}', ${JSON.stringify(c).replace(/"/g, '&quot;')})"><i class="bi bi-pencil"></i></button></td>
+            </tr>`;
+        }).join('');
+        document.getElementById('chapters-tbody').innerHTML = html || '<tr><td colspan="7" class="text-center text-muted">暂无章节</td></tr>';
+        document.getElementById('chapters-info').textContent = `共 ${data.total} 条，第 ${data.page}/${Math.ceil(data.total / data.page_size)} 页`;
+
+        const totalPages = Math.ceil(data.total / data.page_size);
+        let pagHtml = '';
+        if (page > 1) pagHtml += `<button class="btn btn-sm btn-outline-primary me-1" onclick="loadChapters(${page-1})">上一页</button>`;
+        if (page < totalPages) pagHtml += `<button class="btn btn-sm btn-outline-primary" onclick="loadChapters(${page+1})">下一页</button>`;
+        document.getElementById('chapters-pagination').innerHTML = pagHtml;
+    } catch (e) {
+        showToast('加载失败: ' + e.message, 'danger');
+    }
+}
+
+function openEditChapter(chapterId, chapter) {
+    document.getElementById('edit-chapter-id').value = chapterId;
+    document.getElementById('edit-chapter-name').value = chapter.chapter_name || '';
+    document.getElementById('edit-chapter-status').value = chapter.upload_status || 'pending';
+    new bootstrap.Modal(document.getElementById('editChapterModal')).show();
+}
+
+async function saveChapterEdit() {
+    const chapterId = document.getElementById('edit-chapter-id').value;
+    const body = {
+        chapter_name: document.getElementById('edit-chapter-name').value,
+        upload_status: document.getElementById('edit-chapter-status').value,
+    };
+    try {
+        const data = await api(`/api/albums/${bookId}/chapters/${chapterId}`, { method: 'PUT', body: JSON.stringify(body) });
+        if (data.ok) {
+            showToast('已保存', 'success');
+            bootstrap.Modal.getInstance(document.getElementById('editChapterModal')).hide();
+            loadChapters(currentChapterPage);
+        } else {
+            showToast('保存失败: ' + (data.error || ''), 'danger');
+        }
+    } catch (e) {
+        showToast('保存失败: ' + e.message, 'danger');
+    }
+}
+
+async function scrapeTracks() {
+    const btn = document.getElementById('btn-scrape-tracks');
+    btn.disabled = true;
+    btn.textContent = '获取中...';
+    try {
+        const data = await api(`/api/albums/${bookId}/scrape-tracks`, { method: 'POST' });
+        if (data.ok) {
+            showToast(`获取完成: ${data.total_tracks} 集`, 'success');
+            loadAlbum();
+            loadChapters(1);
+        } else {
+            showToast('获取失败: ' + (data.error || '未知错误'), 'danger');
+        }
+    } catch (e) {
+        showToast('获取失败: ' + e.message, 'danger');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '获取章节';
+    }
+}
+
+async function createJob() {
+    if (!confirm('确认为此专辑创建处理任务？')) return;
+    try {
+        const data = await api('/api/jobs/create', {
+            method: 'POST',
+            body: JSON.stringify({ book_id: bookId }),
+        });
+        if (data.ok) {
+            showToast(`任务已创建: #${data.job.job_id}`, 'success');
+        } else {
+            showToast('创建失败: ' + (data.error || '未知错误'), 'danger');
+        }
+    } catch (e) {
+        showToast('创建失败: ' + e.message, 'danger');
+    }
+}
+
+async function resetChapters() {
+    if (!confirm('确认重置所有失败/待处理章节？这将清除 Worker 认领记录。')) return;
+    try {
+        const data = await api(`/api/albums/${bookId}/reset-chapters`, { method: 'POST' });
+        if (data.ok) {
+            showToast(`已重置 ${data.reset} 个章节`, 'success');
+            loadAlbum();
+            loadChapters(1);
+        }
+    } catch (e) {
+        showToast('重置失败: ' + e.message, 'danger');
+    }
+}
+
+loadCategories().then(() => {
+    loadAlbum();
+    loadChapters(1);
+});
+</script>
+{% endblock %}

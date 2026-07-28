@@ -1,0 +1,77 @@
+# ═══════════════════════════════════════════════════════════════
+# 喜马拉雅有声书管理系统 — Docker Compose
+# ═══════════════════════════════════════════════════════════════
+# 包含 Web 应用 + PostgreSQL 两个服务
+# 用法：
+#   docker-compose up -d --build
+# ═══════════════════════════════════════════════════════════════
+
+services:
+  # ─── PostgreSQL 数据库 ───
+  postgres:
+    image: postgres:16-alpine
+    container_name: xm_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ximalaya
+      POSTGRES_USER: xm_app
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_strong_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U xm_app -d ximalaya"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - xm_net
+
+  # ─── Web 应用（FastAPI + Jinja2 SSR）───
+  web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web
+    container_name: xm_web
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    environment:
+      - DATABASE_URL=postgresql://xm_app:${POSTGRES_PASSWORD:-changeme_strong_password}@postgres:5432/ximalaya
+      - SECRET_KEY=${SECRET_KEY:-dev_secret_key_change_in_production}
+      - BASE_URL=${BASE_URL:-http://localhost:59388}
+      - APP_PASSWORD=${APP_PASSWORD:-inriynisse}
+      - WORKER_AUTH_TOKEN=${WORKER_AUTH_TOKEN:-changeme_worker_token}
+    volumes:
+      - ./backend:/app/backend:ro
+      - ./pipeline:/app/pipeline:ro
+      - ./backups:/app/backups
+      - ./.env:/app/.env:ro
+    ports:
+      - "59388:59388"
+    networks:
+      - xm_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:59388/api/system/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  postgres_data:
+
+networks:
+  xm_net:
+    driver: bridge

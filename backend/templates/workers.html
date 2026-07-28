@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}Worker 统计 — 喜马拉雅有声书管理{% endblock %}
+{% block nav_workers %}active{% endblock %}
+
+{% block content %}
+<h4 class="mb-4">Worker 统计</h4>
+
+<div class="card p-3">
+    <div class="table-responsive">
+        <table class="table table-sm table-hover">
+            <thead>
+                <tr>
+                    <th>Worker ID</th>
+                    <th>总任务</th>
+                    <th>成功</th>
+                    <th>失败</th>
+                    <th>处理章节</th>
+                    <th>累计耗时</th>
+                    <th>最后任务</th>
+                    <th>最后在线</th>
+                    <th>状态</th>
+                </tr>
+            </thead>
+            <tbody id="workers-tbody">
+                <tr><td colspan="9" class="text-center text-muted">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function fmtDuration(seconds) {
+    if (!seconds) return '-';
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    if (h > 0) return `${h}h${m}m`;
+    return `${m}m`;
+}
+
+function isActive(lastSeen) {
+    if (!lastSeen) return false;
+    const diff = (Date.now() - new Date(lastSeen).getTime()) / 1000;
+    return diff < 300; // 5 分钟内
+}
+
+async function loadWorkers() {
+    try {
+        const data = await api('/api/workers');
+        const workers = data.workers || [];
+        const html = workers.map(w => {
+            const active = isActive(w.last_seen_at);
+            return `<tr>
+                <td>${w.worker_id}</td>
+                <td>${w.total_jobs}</td>
+                <td class="text-success">${w.success_jobs}</td>
+                <td class="text-danger">${w.failed_jobs}</td>
+                <td>${w.total_chapters}</td>
+                <td>${fmtDuration(w.total_seconds)}</td>
+                <td>${fmtTime(w.last_job_at)}</td>
+                <td>${fmtTime(w.last_seen_at)}</td>
+                <td>${active ? '<span class="badge bg-success">在线</span>' : '<span class="badge bg-secondary">离线</span>'}</td>
+            </tr>`;
+        }).join('');
+        document.getElementById('workers-tbody').innerHTML = html || '<tr><td colspan="9" class="text-center text-muted">暂无 Worker</td></tr>';
+    } catch (e) {
+        showToast('加载失败: ' + e.message, 'danger');
+    }
+}
+
+loadWorkers();
+setInterval(loadWorkers, 10000);
+</script>
+{% endblock %}
