@@ -16,6 +16,7 @@ from ...pipeline.ximalaya_api import (
     normalize_album_record,
     CATEGORIES,
 )
+from ...pipeline.proxy_pool import init_pool, get_proxy, get_pool
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,44 @@ def _build_headers(cookie: str = "") -> dict:
     if cookie:
         headers["Cookie"] = cookie
     return headers
+
+
+def _init_proxy_pool():
+    """从全局设置读取代理配置并初始化代理池。
+
+    返回 (proxy_enabled, proxy_proxies_dict)。
+    如果代理未启用或未配置，返回 (False, {})。
+    """
+    rows = fetch_all(
+        "SELECT setting_key, setting_value FROM public.global_settings "
+        "WHERE setting_key IN ('PROXY_ENABLED', 'PROXY_LIST', 'PROXY_TEST_URL', "
+        "'PROXY_DEAD_RETRY_MINUTES', 'PROXY_TIMEOUT')"
+    )
+    settings_map = {row["setting_key"]: row["setting_value"] for row in (rows or [])}
+
+    proxy_enabled = settings_map.get("PROXY_ENABLED", "false").lower() == "true"
+    if not proxy_enabled:
+        return False, {}
+
+    proxy_list_raw = settings_map.get("PROXY_LIST", "")
+    proxy_list = [line.strip() for line in proxy_list_raw.splitlines() if line.strip()]
+    if not proxy_list:
+        return False, {}
+
+    init_pool(
+        proxy_list=proxy_list,
+        test_url=settings_map.get("PROXY_TEST_URL", "https://www.ximalaya.com"),
+        dead_retry_minutes=int(settings_map.get("PROXY_DEAD_RETRY_MINUTES", "5")),
+        timeout=int(settings_map.get("PROXY_TIMEOUT", "10")),
+    )
+
+    # 启动时做一次健康检测
+    pool = get_pool()
+    if pool:
+        stats = pool.health_check()
+        logger.info(f"代理池健康检测: {stats['alive']}/{stats['total']} 可用")
+
+    return True, get_proxy()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -60,11 +99,14 @@ def scrape_and_save_category(
     cookie = get_xm_cookie()
     headers = _build_headers(cookie)
 
+    # 初始化代理池
+    proxy_enabled, proxies = _init_proxy_pool()
+
     # 采集
     albums = _scrape_category(
         category, max_pages=max_pages, sort=sort,
         free_only=free_only, max_albums=max_albums,
-        headers=headers,
+        headers=headers, proxies=proxies or None,
     )
 
     # 写入数据库（批量 INSERT）
@@ -139,8 +181,11 @@ def scrape_album_tracks(book_id: str) -> dict:
     cookie = get_xm_cookie()
     headers = _build_headers(cookie)
 
+    # 初始化代理池
+    proxy_enabled, proxies = _init_proxy_pool()
+
     # 获取章节列表
-    tracks, album_title = _get_all_tracks(album_id, headers)
+    tracks, album_title = _get_all_tracks(album_id, headers, proxies=proxies or None)
 
     if not tracks:
         return {"ok": False, "error": "未获取到章节列表"}

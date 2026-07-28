@@ -146,6 +146,11 @@ def api_config(worker_id: str = Query("")):
             "download_interval": float(settings_map.get("DOWNLOAD_INTERVAL", "1.5")),
             "tg_serial_upload": settings_map.get("TG_SERIAL_UPLOAD", "true").lower() == "true",
             "tg_upload_interval": float(settings_map.get("TG_UPLOAD_INTERVAL", "3")),
+            "proxy_enabled": settings_map.get("PROXY_ENABLED", "false").lower() == "true",
+            "proxy_list": [line.strip() for line in settings_map.get("PROXY_LIST", "").splitlines() if line.strip()],
+            "proxy_test_url": settings_map.get("PROXY_TEST_URL", "https://www.ximalaya.com"),
+            "proxy_dead_retry_minutes": int(settings_map.get("PROXY_DEAD_RETRY_MINUTES", "5")),
+            "proxy_timeout": int(settings_map.get("PROXY_TIMEOUT", "10")),
         },
     }
 

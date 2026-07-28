@@ -154,5 +154,10 @@ INSERT INTO public.global_settings (setting_key, setting_value, description, is_
     ('DEEPFILTER_SEGMENT_MINUTES', '60', 'DeepFilter 音频分片时长（分钟）', false),
     ('DOWNLOAD_INTERVAL', '1.5', '下载间隔秒数', false),
     ('TG_SERIAL_UPLOAD', 'true', '是否串行上传到TG（避免限流）', false),
-    ('TG_UPLOAD_INTERVAL', '3', 'TG上传间隔秒数', false)
+    ('TG_UPLOAD_INTERVAL', '3', 'TG上传间隔秒数', false),
+    ('PROXY_ENABLED', 'false', '是否启用代理（采集和下载均通过代理）', false),
+    ('PROXY_LIST', '', '代理列表，每行一个，格式 http://ip:port 或 socks5://ip:port', false),
+    ('PROXY_TEST_URL', 'https://www.ximalaya.com', '代理健康检测URL', false),
+    ('PROXY_DEAD_RETRY_MINUTES', '5', '死亡代理重试间隔（分钟）', false),
+    ('PROXY_TIMEOUT', '10', '代理请求超时秒数', false)
 ON CONFLICT (setting_key) DO NOTHING;

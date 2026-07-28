@@ -170,7 +170,8 @@ def extract_albums_from_html(text: str) -> list[dict]:
 
 
 def fetch_category_page(category: str, page: int, sort: str = "",
-                        headers: dict | None = None) -> tuple[list[dict], int]:
+                        headers: dict | None = None,
+                        proxies: dict | None = None) -> tuple[list[dict], int]:
     """抓取分类页面的专辑列表。"""
     parts = [BASE_URL, "category", category, "reci1"]
     if sort:
@@ -180,7 +181,7 @@ def fetch_category_page(category: str, page: int, sort: str = "",
 
     hdrs = {**DEFAULT_HEADERS, **(headers or {})}
     try:
-        resp = requests.get(url, headers=hdrs, timeout=20)
+        resp = requests.get(url, headers=hdrs, timeout=20, proxies=proxies or None)
         albums = extract_albums_from_html(resp.text)
         return albums, len(resp.text)
     except Exception as e:
@@ -222,7 +223,8 @@ def _build_cover_url(album_id: Any, cover_path: str) -> str:
 
 def scrape_category(category: str, max_pages: int = 0, sort: str = "default",
                     free_only: bool = False, max_albums: int = 0,
-                    headers: dict | None = None) -> list[dict]:
+                    headers: dict | None = None,
+                    proxies: dict | None = None) -> list[dict]:
     """采集分类下的所有专辑，返回标准化专辑列表。"""
     sort_param = SORT_MAP.get(sort, "")
     all_albums: list[dict] = []
@@ -238,7 +240,7 @@ def scrape_category(category: str, max_pages: int = 0, sort: str = "default",
         if max_albums > 0 and len(all_albums) >= max_albums:
             break
 
-        albums, html_len = fetch_category_page(category, page, sort_param, headers)
+        albums, html_len = fetch_category_page(category, page, sort_param, headers, proxies)
 
         if not albums:
             empty_count += 1
@@ -275,23 +277,25 @@ def scrape_category(category: str, max_pages: int = 0, sort: str = "default",
 # ═══════════════════════════════════════════════════════════
 
 def get_track_list(album_id: str, page: int = 1,
-                   headers: dict | None = None) -> dict:
+                   headers: dict | None = None,
+                   proxies: dict | None = None) -> dict:
     """获取分页音频列表（移动端 API）。"""
     url = "http://mobwsa.ximalaya.com/mobile/playlist/album/page"
     params = {"albumId": album_id, "pageId": page}
     hdrs = {**DEFAULT_HEADERS, **(headers or {})}
-    resp = requests.get(url, params=params, headers=hdrs, timeout=15)
+    resp = requests.get(url, params=params, headers=hdrs, timeout=15, proxies=proxies or None)
     resp.raise_for_status()
     return resp.json()
 
 
-def get_all_tracks(album_id: str, headers: dict | None = None) -> tuple[list[dict], str]:
+def get_all_tracks(album_id: str, headers: dict | None = None,
+                   proxies: dict | None = None) -> tuple[list[dict], str]:
     """获取全部音频列表，返回 (tracks, album_title)。
 
     每个 track: {trackId, title, orderNo, duration}
     """
     hdrs = {**DEFAULT_HEADERS, **(headers or {})}
-    first_page = get_track_list(album_id, 1, hdrs)
+    first_page = get_track_list(album_id, 1, hdrs, proxies)
     max_page = first_page.get("maxPageId", 1)
     total = first_page.get("totalCount", 0)
     album_title = ""
@@ -304,7 +308,7 @@ def get_all_tracks(album_id: str, headers: dict | None = None) -> tuple[list[dic
         if page == 1:
             data = first_page
         else:
-            data = get_track_list(album_id, page, hdrs)
+            data = get_track_list(album_id, page, hdrs, proxies)
             time.sleep(0.5)
         for item in data.get("list", []):
             tracks.append({
@@ -318,10 +322,11 @@ def get_all_tracks(album_id: str, headers: dict | None = None) -> tuple[list[dic
     return tracks, album_title
 
 
-def get_album_info(album_id: str, headers: dict | None = None) -> dict:
+def get_album_info(album_id: str, headers: dict | None = None,
+                   proxies: dict | None = None) -> dict:
     """获取专辑详情（从 track API 第一页提取）。"""
     hdrs = {**DEFAULT_HEADERS, **(headers or {})}
-    first_page = get_track_list(album_id, 1, hdrs)
+    first_page = get_track_list(album_id, 1, hdrs, proxies)
     if not first_page.get("list"):
         return {}
     first_item = first_page["list"][0]
@@ -338,7 +343,8 @@ def get_album_info(album_id: str, headers: dict | None = None) -> dict:
 # ═══════════════════════════════════════════════════════════
 
 def get_download_url(track_id: str, headers: dict | None = None,
-                     max_retries: int = 3) -> tuple[str | None, int]:
+                     max_retries: int = 3,
+                     proxies: dict | None = None) -> tuple[str | None, int]:
     """通过 mobile-playpage API 获取音频下载 URL。
 
     返回 (url, file_size) 或 (None, 0)
@@ -353,7 +359,7 @@ def get_download_url(track_id: str, headers: dict | None = None,
             resp = requests.get(
                 f"{BASE_URL}/mobile-playpage/track/v3/baseInfo/{ts}",
                 params={"device": "web", "trackId": str(track_id), "trackQualityLevel": "3"},
-                headers=hdrs, timeout=15)
+                headers=hdrs, timeout=15, proxies=proxies or None)
             data = resp.json()
 
             if data.get("ret") != 0:
@@ -390,7 +396,8 @@ def get_download_url(track_id: str, headers: dict | None = None,
 
 
 def download_track(track_id: str, save_path: str, headers: dict | None = None,
-                   max_retries: int = 3) -> tuple[str, int]:
+                   max_retries: int = 3,
+                   proxies: dict | None = None) -> tuple[str, int]:
     """下载单集音频到指定路径，返回 (status, file_size)。
 
     status: "downloaded" / "skipped" / "no_url" / "download_failed"
@@ -401,7 +408,7 @@ def download_track(track_id: str, save_path: str, headers: dict | None = None,
     if os.path.exists(save_path) and os.path.getsize(save_path) > 1000:
         return "skipped", os.path.getsize(save_path)
 
-    download_url, file_size = get_download_url(track_id, headers)
+    download_url, file_size = get_download_url(track_id, headers, max_retries=max_retries, proxies=proxies)
     if not download_url:
         return "no_url", 0
 
@@ -410,7 +417,7 @@ def download_track(track_id: str, save_path: str, headers: dict | None = None,
 
     for attempt in range(max_retries):
         try:
-            resp = requests.get(download_url, headers=hdrs, stream=True, timeout=120)
+            resp = requests.get(download_url, headers=hdrs, stream=True, timeout=120, proxies=proxies or None)
             resp.raise_for_status()
 
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)

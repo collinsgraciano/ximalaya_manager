@@ -141,10 +141,36 @@ class ColabWorker:
                 self.config = resp.get("config", {})
                 logger.info(f"配置获取成功: TG tokens={len(self.config.get('tg_bot_tokens', []))}, "
                            f"deepfilter={self.config.get('enable_deepfilter', True)}")
+
+                # 初始化代理池
+                self._init_proxy()
+
                 return self.config
         except Exception as e:
             logger.error(f"配置获取失败: {e}")
         return {}
+
+    def _init_proxy(self):
+        """根据配置初始化代理池。"""
+        if not self.config.get("proxy_enabled"):
+            return
+
+        proxy_list = self.config.get("proxy_list", [])
+        if not proxy_list:
+            logger.warning("代理已启用但代理列表为空")
+            return
+
+        from pipeline.proxy_pool import init_pool, get_pool
+        init_pool(
+            proxy_list=proxy_list,
+            test_url=self.config.get("proxy_test_url", "https://www.ximalaya.com"),
+            dead_retry_minutes=int(self.config.get("proxy_dead_retry_minutes", 5)),
+            timeout=int(self.config.get("proxy_timeout", 10)),
+        )
+        pool = get_pool()
+        if pool:
+            stats = pool.health_check()
+            logger.info(f"代理池初始化: {stats['alive']}/{stats['total']} 可用")
 
     # ─── 任务认领 ───
 
@@ -189,8 +215,18 @@ class ColabWorker:
 
             download_interval = self.config.get("download_interval", 1.5)
 
-            status, file_size = download_track(track_id, audio_path, headers=headers)
+            # 获取代理
+            from pipeline.proxy_pool import get_pool
+            pool = get_pool()
+            proxies = pool.get() if pool else None
+
+            status, file_size = download_track(track_id, audio_path, headers=headers, proxies=proxies)
             if status not in ("downloaded", "skipped"):
+                # 下载失败时标记代理不可用
+                if pool and proxies:
+                    proxy_url = proxies.get("http") or proxies.get("https")
+                    if proxy_url:
+                        pool.mark_dead(proxy_url)
                 return self._report_chapter(job_id, chapter_id, "failed", error_message=f"下载失败: {status}")
             if status == "skipped" and file_size < 1000:
                 return self._report_chapter(job_id, chapter_id, "failed", error_message="文件太小")
