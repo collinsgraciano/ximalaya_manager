@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from psycopg import sql
 from psycopg.types.json import Jsonb
 from datetime import datetime
@@ -18,7 +19,7 @@ from pipeline.ximalaya_api import (
     CATEGORIES,
     get_categories as _get_api_categories,
 )
-from pipeline.proxy_pool import init_pool, get_proxy, get_pool, auto_discover_proxies
+from pipeline.proxy_pool import init_pool, get_proxy, get_pool, get_random_proxy, auto_discover_proxies
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +161,17 @@ def _init_proxy_pool():
         stats = pool.health_check()
         logger.info(f"代理池健康检测: {stats['alive']}/{stats['total']} 可用")
 
+        # health_check 后把存活的代理回写缓存，踢除已失效的
+        if stats["dead"] > 0:
+            alive_proxies = [p for p in pool._sorted_proxies]
+            if alive_proxies:
+                cache_json = json.dumps({"proxies": alive_proxies, "verified_at": datetime.now().isoformat()})
+                execute(
+                    sql.SQL("UPDATE public.global_settings SET setting_value = %s WHERE setting_key = 'PROXY_VERIFIED_CACHE'"),
+                    (cache_json,),
+                )
+                logger.info(f"已更新缓存: 踢除 {stats['dead']} 个失效代理, 保留 {len(alive_proxies)} 个")
+
         # 全部失效 → 清缓存重新发现
         if stats["alive"] == 0 and stats["total"] > 0:
             logger.warning("所有缓存代理已失效，重新发现...")
@@ -175,6 +187,13 @@ def _init_proxy_pool():
                 if pool:
                     stats = pool.health_check()
                     logger.info(f"重新发现后健康检测: {stats['alive']}/{stats['total']} 可用")
+                    # 回写缓存（仅存活的）
+                    if pool._sorted_proxies:
+                        cache_json = json.dumps({"proxies": list(pool._sorted_proxies), "verified_at": datetime.now().isoformat()})
+                        execute(
+                            sql.SQL("UPDATE public.global_settings SET setting_value = %s WHERE setting_key = 'PROXY_VERIFIED_CACHE'"),
+                            (cache_json,),
+                        )
             else:
                 logger.warning("重新发现代理失败，使用直连")
                 return False, {}
@@ -408,10 +427,11 @@ def _scrape_background(categories: list[str], max_pages: int, sort: str,
             )
 
 
-def scrape_album_tracks(book_id: str) -> dict:
+def scrape_album_tracks(book_id: str, proxies: dict | None = None) -> dict:
     """获取专辑的所有章节列表并保存到数据库。
 
     book_id 格式: xm_{albumId}
+    proxies: 可选，外部传入的代理字典。如为 None 则从代理池获取。
     """
     # 从 book_id 提取 album_id
     if not book_id.startswith("xm_"):
@@ -421,8 +441,9 @@ def scrape_album_tracks(book_id: str) -> dict:
     cookie = get_xm_cookie()
     headers = _build_headers(cookie)
 
-    # 初始化代理池
-    proxy_enabled, proxies = _init_proxy_pool()
+    # 代理：外部传入优先，否则初始化代理池获取
+    if proxies is None:
+        _, proxies = _init_proxy_pool()
 
     # 获取章节列表
     tracks, album_title = _get_all_tracks(album_id, headers, proxies=proxies or None)
@@ -606,6 +627,7 @@ _tracks_state: dict = {
     "total": 0,
     "done": 0,
     "failed": 0,
+    "workers": 1,
     "current_book": "",
     "message": "",
     "log": [],
@@ -631,7 +653,7 @@ def stop_tracks_scrape() -> bool:
         return True
 
 
-def start_scrape_all_tracks() -> bool:
+def start_scrape_all_tracks(max_workers: int = 5) -> bool:
     global _tracks_stop_flag
     with _tracks_lock:
         if _tracks_state["active"]:
@@ -643,6 +665,7 @@ def start_scrape_all_tracks() -> bool:
             "total": 0,
             "done": 0,
             "failed": 0,
+            "workers": max_workers,
             "current_book": "",
             "message": "开始获取章节",
             "log": [],
@@ -650,18 +673,17 @@ def start_scrape_all_tracks() -> bool:
             "finished_at": "",
         })
 
-    thread = threading.Thread(target=_scrape_all_tracks_background, daemon=True)
+    thread = threading.Thread(target=_scrape_all_tracks_background, args=(max_workers,), daemon=True)
     thread.start()
     return True
 
 
-def _scrape_all_tracks_background():
+def _scrape_all_tracks_background(max_workers: int = 5):
     global _tracks_stop_flag
-    import time as _time
 
     cookie = get_xm_cookie()
     headers = _build_headers(cookie)
-    proxy_enabled, proxies = _init_proxy_pool()
+    proxy_enabled, _ = _init_proxy_pool()
 
     def _log(msg: str):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -669,50 +691,113 @@ def _scrape_all_tracks_background():
             _tracks_state["log"].append(f"[{ts}] {msg}")
             _tracks_state["log"] = _tracks_state["log"][-100:]
 
-    try:
-        rows = fetch_all("SELECT book_id, book_name FROM public.books ORDER BY book_id")
-        if not rows:
-            _log("没有专辑需要处理")
-            with _tracks_lock:
-                _tracks_state["status"] = "done"
-                _tracks_state["active"] = False
-                _tracks_state["message"] = "没有专辑需要处理"
-                _tracks_state["finished_at"] = datetime.now().strftime("%H:%M:%S")
+    def _scrape_one_book(idx: int, total: int, book_id: str, book_name: str):
+        """单个专辑章节采集任务（在线程池中执行）。"""
+        if _tracks_stop_flag:
             return
 
-        with _tracks_lock:
-            _tracks_state["total"] = len(rows)
-        _log(f"共 {len(rows)} 个专辑需要获取章节")
-
-        for idx, row in enumerate(rows):
+        max_retries = 3
+        for attempt in range(max_retries):
             if _tracks_stop_flag:
-                _log("用户手动停止")
-                break
+                return
 
-            book_id = row["book_id"]
-            book_name = row.get("book_name", book_id)
+            # 每次尝试随机选不同代理
+            proxies = get_random_proxy() if proxy_enabled else None
+            proxy_tag = ""
+            if proxies and proxies.get("http"):
+                proxy_tag = f" [{proxies['http'].split('//')[-1]}]"
+            else:
+                proxy_tag = " [直连]"
 
-            with _tracks_lock:
-                _tracks_state["current_book"] = f"{book_name} ({idx + 1}/{len(rows)})"
-                _tracks_state["message"] = f"正在获取: {book_name} ({idx + 1}/{len(rows)})"
-            _log(f"开始获取章节: {book_name}")
+            if attempt == 0:
+                with _tracks_lock:
+                    _tracks_state["current_book"] = f"{book_name} ({idx + 1}/{total})"
+                    _tracks_state["message"] = f"正在获取: {book_name} ({idx + 1}/{total})"
+                _log(f"[{idx+1}/{total}] {book_name}{proxy_tag}")
+            else:
+                _log(f"  重试 {book_name} (第{attempt+1}次){proxy_tag}")
 
             try:
-                result = scrape_album_tracks(book_id)
+                result = scrape_album_tracks(book_id, proxies=proxies or None)
                 if result.get("ok"):
                     with _tracks_lock:
                         _tracks_state["done"] += 1
-                    _log(f"  {book_name}: {result.get('total_tracks', 0)} 集")
+                    _log(f"  成功 {book_name}: {result.get('total_tracks', 0)} 集")
+                    return
                 else:
+                    err = result.get("error", "未知错误")
+                    if attempt < max_retries - 1:
+                        _log(f"  失败 {book_name}: {err}, 换代理重试...")
+                        continue
                     with _tracks_lock:
                         _tracks_state["failed"] += 1
-                    _log(f"  {book_name} 失败: {result.get('error', '未知错误')}")
+                    _log(f"  失败 {book_name}: {err}")
+                    return
             except Exception as e:
+                if attempt < max_retries - 1:
+                    _log(f"  异常 {book_name}: {e}, 换代理重试...")
+                    continue
                 with _tracks_lock:
                     _tracks_state["failed"] += 1
-                _log(f"  {book_name} 异常: {e}")
+                _log(f"  异常 {book_name}: {e}")
+                return
 
-            _time.sleep(1)
+    try:
+        rows = fetch_all(
+            sql.SQL("""
+                SELECT b.book_id, b.book_name,
+                       COALESCE(b.total_chapters, 0) AS total_chapters,
+                       COALESCE(c.chapter_count, 0) AS chapter_count
+                FROM public.books b
+                LEFT JOIN (
+                    SELECT book_id, COUNT(*) AS chapter_count
+                    FROM public.audiobook_chapters
+                    GROUP BY book_id
+                ) c ON c.book_id = b.book_id
+                WHERE COALESCE(c.chapter_count, 0) = 0
+                   OR COALESCE(c.chapter_count, 0) < COALESCE(b.total_chapters, 0)
+                ORDER BY b.book_id
+            """),
+        )
+        if not rows:
+            _log("没有需要获取章节的专辑（所有专辑章节已完整）")
+            with _tracks_lock:
+                _tracks_state["status"] = "done"
+                _tracks_state["active"] = False
+                _tracks_state["message"] = "没有需要获取章节的专辑"
+                _tracks_state["finished_at"] = datetime.now().strftime("%H:%M:%S")
+            return
+
+        # 统计跳过的数量
+        all_count = fetch_val("SELECT COUNT(*) FROM public.books")
+        all_count = int(all_count or 0)
+        skipped = all_count - len(rows)
+
+        total = len(rows)
+        with _tracks_lock:
+            _tracks_state["total"] = total
+        _log(f"共 {all_count} 个专辑, 跳过 {skipped} 个已完整, 待处理 {total} 个, {max_workers} 线程并发, 代理{'已启用' if proxy_enabled else '未启用(直连)'}")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
+            for idx, row in enumerate(rows):
+                if _tracks_stop_flag:
+                    break
+                book_id = row["book_id"]
+                book_name = row.get("book_name", book_id)
+                future = executor.submit(_scrape_one_book, idx, total, book_id, book_name)
+                futures[future] = book_name
+
+            for future in as_completed(futures):
+                if _tracks_stop_flag:
+                    break
+                try:
+                    future.result()
+                except Exception as e:
+                    book_name = futures[future]
+                    with _tracks_lock:
+                        _tracks_state["failed"] += 1
+                    _log(f"  未捕获异常 {book_name}: {e}")
 
         with _tracks_lock:
             _tracks_state["status"] = "stopped" if _tracks_stop_flag else "done"
