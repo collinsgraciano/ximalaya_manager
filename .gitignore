@@ -7,3 +7,5 @@ downloads/
 backups/
 *.log
 .codely-cli/
+CODELY.md
+mem-log/
