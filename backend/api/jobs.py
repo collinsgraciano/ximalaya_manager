@@ -69,6 +69,11 @@ class ChapterResult(BaseModel):
     telegram_bot_id: int | None = None
     telegram_bot_user_id: int | None = None
     error_message: str = ""
+    # 原始音频（降噪前）TG 缓存
+    original_telegram_file_id: str = ""
+    original_telegram_message_id: int = 0
+    original_telegram_bot_id: int | None = None
+    original_telegram_bot_user_id: int | None = None
 
 
 @router.post("/jobs/{job_id}/chapter")
@@ -91,6 +96,10 @@ def api_chapter_result(job_id: int, result: ChapterResult,
         telegram_bot_id=result.telegram_bot_id,
         telegram_bot_user_id=result.telegram_bot_user_id,
         error_message=result.error_message,
+        original_telegram_file_id=result.original_telegram_file_id,
+        original_telegram_message_id=result.original_telegram_message_id,
+        original_telegram_bot_id=result.original_telegram_bot_id,
+        original_telegram_bot_user_id=result.original_telegram_bot_user_id,
     )
 
     # 累加 Worker 章节数

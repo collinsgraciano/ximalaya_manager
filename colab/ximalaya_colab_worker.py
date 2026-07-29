@@ -258,32 +258,7 @@ class ColabWorker:
 
             time.sleep(download_interval)
 
-            # ─── 2. DeepFilter 降噪 ───
-            if self.config.get("enable_deepfilter", True):
-                logger.info(f"  降噪中: {chapter_name}")
-                try:
-                    from pipeline.deepfilter import denoise_audio_keep_format, setup_deep_filter
-
-                    # 确保二进制就绪
-                    if not os.path.exists(
-                        os.path.join(os.environ.get("DEEPFILTER_DIR", "/content/.deepfilter"),
-                                     "deep-filter-0.5.6-x86_64-unknown-linux-musl")
-                    ):
-                        setup_deep_filter()
-
-                    seg_min = self.config.get("deepfilter_segment_minutes", 60)
-                    model = self.config.get("deepfilter_model", "DeepFilterNet2")
-                    denoised_path = audio_path.replace(".m4a", "_denoised.m4a")
-                    denoised_path = denoise_audio_keep_format(audio_path, denoised_path, seg_min, model=model)
-
-                    # 用降噪后的文件
-                    if os.path.exists(denoised_path) and os.path.getsize(denoised_path) > 0:
-                        audio_path = denoised_path
-                except Exception as e:
-                    logger.warning(f"  降噪失败，使用原始音频: {e}")
-
-            # ─── 3. 上传到 Telegram ───
-            logger.info(f"  上传TG: {chapter_name}")
+            # ─── 2. 上传原始音频到 Telegram（降噪前）───
             from pipeline.tg_upload import upload_with_token_rotation
 
             bot_tokens = self.config.get("tg_bot_tokens", [])
@@ -295,6 +270,57 @@ class ColabWorker:
                 return self._report_chapter(job_id, chapter_id, "failed",
                                            error_message="TG Bot Token 或 Chat ID 未配置")
 
+            logger.info(f"  上传原始音频TG: {chapter_name}")
+            orig_result = upload_with_token_rotation(
+                file_path=audio_path,
+                bot_tokens=bot_tokens,
+                chat_id=chat_id,
+                title=f"[原] {chapter_name[:60]}",
+                caption=chapter_name,
+                serial=serial,
+                interval=interval,
+            )
+            original_file_id = ""
+            original_message_id = 0
+            original_bot_idx = None
+            original_bot_user_id = None
+            if orig_result.get("ok"):
+                original_file_id = orig_result.get("file_id", "")
+                original_message_id = orig_result.get("message_id", 0)
+                original_bot_idx = orig_result.get("bot_token_idx")
+                original_bot_user_id = orig_result.get("bot_user_id")
+                logger.info(f"  原始音频已上传: file_id={original_file_id[:20]}...")
+            else:
+                logger.warning(f"  原始音频上传失败: {orig_result.get('error', '')}, 继续处理")
+
+            # ─── 3. DeepFilter 降噪 ───
+            if self.config.get("enable_deepfilter", True):
+                logger.info(f"  降噪中: {chapter_name}")
+                try:
+                    from pipeline.deepfilter import denoise_audio_keep_format, setup_deep_filter
+
+                    model = self.config.get("deepfilter_model", "DeepFilterNet2")
+
+                    # GTCRN 不需要 deep-filter 二进制
+                    if model != "GTCRN":
+                        if not os.path.exists(
+                            os.path.join(os.environ.get("DEEPFILTER_DIR", "/content/.deepfilter"),
+                                         "deep-filter-0.5.6-x86_64-unknown-linux-musl")
+                        ):
+                            setup_deep_filter()
+
+                    seg_min = self.config.get("deepfilter_segment_minutes", 60)
+                    denoised_path = audio_path.replace(".m4a", "_denoised.m4a")
+                    denoised_path = denoise_audio_keep_format(audio_path, denoised_path, seg_min, model=model)
+
+                    # 用降噪后的文件
+                    if os.path.exists(denoised_path) and os.path.getsize(denoised_path) > 0:
+                        audio_path = denoised_path
+                except Exception as e:
+                    logger.warning(f"  降噪失败，使用原始音频: {e}")
+
+            # ─── 4. 上传降噪后音频到 Telegram ───
+            logger.info(f"  上传TG: {chapter_name}")
             result = upload_with_token_rotation(
                 file_path=audio_path,
                 bot_tokens=bot_tokens,
@@ -309,12 +335,16 @@ class ColabWorker:
                 return self._report_chapter(job_id, chapter_id, "failed",
                                            error_message=result.get("error", "上传失败"))
 
-            # ─── 4. 上报结果 ───
+            # ─── 5. 上报结果 ───
             return self._report_chapter(job_id, chapter_id, "uploaded",
                                        telegram_file_id=result.get("file_id", ""),
                                        telegram_message_id=result.get("message_id", 0),
                                        telegram_bot_id=result.get("bot_token_idx"),
-                                       telegram_bot_user_id=result.get("bot_user_id"))
+                                       telegram_bot_user_id=result.get("bot_user_id"),
+                                       original_telegram_file_id=original_file_id,
+                                       original_telegram_message_id=original_message_id,
+                                       original_telegram_bot_id=original_bot_idx,
+                                       original_telegram_bot_user_id=original_bot_user_id)
 
         except Exception as e:
             logger.error(f"  章节处理异常: {e}", exc_info=True)
@@ -327,7 +357,11 @@ class ColabWorker:
                         telegram_file_id: str = "", telegram_message_id: int = 0,
                         telegram_bot_id: int | None = None,
                         telegram_bot_user_id: int | None = None,
-                        error_message: str = "") -> dict:
+                        error_message: str = "",
+                        original_telegram_file_id: str = "",
+                        original_telegram_message_id: int = 0,
+                        original_telegram_bot_id: int | None = None,
+                        original_telegram_bot_user_id: int | None = None) -> dict:
         """上报章节处理结果。"""
         try:
             resp = self._post(f"/api/jobs/{job_id}/chapter", {
@@ -338,6 +372,10 @@ class ColabWorker:
                 "telegram_bot_id": telegram_bot_id,
                 "telegram_bot_user_id": telegram_bot_user_id,
                 "error_message": error_message,
+                "original_telegram_file_id": original_telegram_file_id,
+                "original_telegram_message_id": original_telegram_message_id,
+                "original_telegram_bot_id": original_telegram_bot_id,
+                "original_telegram_bot_user_id": original_telegram_bot_user_id,
             })
             status_text = "OK" if upload_status == "uploaded" else "FAIL"
             logger.info(f"  [{status_text}] 章节 {chapter_id}: {upload_status}"

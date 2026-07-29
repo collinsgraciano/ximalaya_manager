@@ -36,6 +36,11 @@ async def lifespan(app: FastAPI):
         # 兼容已有表：补充列
         execute(pg_sql.SQL("ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS chapter_order integer"))
         execute(pg_sql.SQL("ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS duration integer"))
+        # 原始音频 TG 缓存字段
+        execute(pg_sql.SQL("ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS original_telegram_file_id text"))
+        execute(pg_sql.SQL("ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS original_telegram_message_id bigint"))
+        execute(pg_sql.SQL("ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS original_telegram_bot_id integer"))
+        execute(pg_sql.SQL("ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS original_telegram_bot_user_id bigint"))
         # xm_jobs 补充 params 列（Colab 传递参数）
         execute(pg_sql.SQL("ALTER TABLE public.xm_jobs ADD COLUMN IF NOT EXISTS params jsonb"))
         logger.info("数据库迁移完成")

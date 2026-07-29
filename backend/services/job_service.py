@@ -208,6 +208,10 @@ def update_chapter_result(
     telegram_bot_id: int | None = None,
     telegram_bot_user_id: int | None = None,
     error_message: str = "",
+    original_telegram_file_id: str = "",
+    original_telegram_message_id: int = 0,
+    original_telegram_bot_id: int | None = None,
+    original_telegram_bot_user_id: int | None = None,
 ) -> dict:
     """更新章节处理结果。"""
     # 获取 job 的 book_id
@@ -230,6 +234,15 @@ def update_chapter_result(
         update_data["telegram_bot_id"] = telegram_bot_id
     if telegram_bot_user_id is not None:
         update_data["telegram_bot_user_id"] = telegram_bot_user_id
+    # 原始音频 TG 缓存
+    if original_telegram_file_id:
+        update_data["original_telegram_file_id"] = original_telegram_file_id
+    if original_telegram_message_id:
+        update_data["original_telegram_message_id"] = original_telegram_message_id
+    if original_telegram_bot_id is not None:
+        update_data["original_telegram_bot_id"] = original_telegram_bot_id
+    if original_telegram_bot_user_id is not None:
+        update_data["original_telegram_bot_user_id"] = original_telegram_bot_user_id
     if upload_status == "uploaded":
         from datetime import datetime
         update_data["uploaded_at"] = datetime.now().isoformat()

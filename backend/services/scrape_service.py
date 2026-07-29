@@ -732,7 +732,9 @@ def get_album_chapters(book_id: str, page: int = 1, page_size: int = 50,
     rows = fetch_all(
         sql.SQL("SELECT book_id, chapter_id, book_name, chapter_name, audio_url, "
                 "telegram_file_id, telegram_message_id, telegram_bot_id, telegram_bot_user_id, "
-                "upload_status, uploaded_at, worker_id, claimed_at, error_message, chapter_order, duration "
+                "upload_status, uploaded_at, worker_id, claimed_at, error_message, chapter_order, duration, "
+                "original_telegram_file_id, original_telegram_message_id, "
+                "original_telegram_bot_id, original_telegram_bot_user_id "
                 "FROM public.audiobook_chapters WHERE {} ORDER BY chapter_order LIMIT %s OFFSET %s").format(
             sql.SQL(where_clause)
         ),

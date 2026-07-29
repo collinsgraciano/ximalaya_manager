@@ -62,6 +62,11 @@ ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS error_message tex
 -- 本项目新增列
 ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS chapter_order integer;
 ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS duration integer;
+-- 原始音频（降噪前）的 TG 缓存信息
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS original_telegram_file_id text;
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS original_telegram_message_id bigint;
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS original_telegram_bot_id integer;
+ALTER TABLE public.audiobook_chapters ADD COLUMN IF NOT EXISTS original_telegram_bot_user_id bigint;
 
 COMMENT ON COLUMN public.audiobook_chapters.telegram_bot_id IS '上传此文件的 Bot 编号（对应 BOT_TOKENS 数组索引）';
 COMMENT ON COLUMN public.audiobook_chapters.telegram_bot_user_id IS '上传此文件的 Bot 的永久 Telegram User ID';
@@ -151,7 +156,7 @@ INSERT INTO public.global_settings (setting_key, setting_value, description, is_
     ('TG_CHAT_ID', '', 'Telegram Chat ID（音频上传目标聊天/频道ID）', false),
     ('XM_COOKIE', '', '喜马拉雅 Cookie（用于下载付费专辑，需含 1&_token）', true),
     ('ENABLE_DEEPFILTER', 'true', '是否启用 DeepFilter 降噪（Colab 端使用）', false),
-    ('DEEPFILTER_MODEL', 'DeepFilterNet2', 'DeepFilter 降噪模型。可选: DeepFilterNet2(v2, 推荐速度快), DeepFilterNet3(v3, 质量最高)', false),
+    ('DEEPFILTER_MODEL', 'DeepFilterNet2', 'DeepFilter 降噪模型。可选: DeepFilterNet2(v2, 推荐速度快), DeepFilterNet3(v3, 质量最高), GTCRN(超轻量最快, 16kHz)', false),
     ('DEEPFILTER_SEGMENT_MINUTES', '60', 'DeepFilter 音频分片时长（分钟）', false),
     ('DOWNLOAD_INTERVAL', '1.5', '下载间隔秒数', false),
     ('TG_SERIAL_UPLOAD', 'true', '是否串行上传到TG（避免限流）', false),

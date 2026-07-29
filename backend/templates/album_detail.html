@@ -42,10 +42,10 @@
     <div class="table-responsive">
         <table class="table table-sm table-hover">
             <thead>
-                <tr><th>#</th><th>标题</th><th>时长</th><th>状态</th><th>TG file_id</th><th>Bot</th><th>Worker</th><th>操作</th></tr>
+                <tr><th>#</th><th>标题</th><th>时长</th><th>状态</th><th>TG file_id</th><th>原音频 file_id</th><th>Bot</th><th>Worker</th><th>操作</th></tr>
             </thead>
             <tbody id="chapters-tbody">
-                <tr><td colspan="8" class="text-center text-muted">加载中...</td></tr>
+                <tr><td colspan="9" class="text-center text-muted">加载中...</td></tr>
             </tbody>
         </table>
     </div>
@@ -211,6 +211,7 @@ async function loadChapters(page) {
         const html = chapters.map(c => {
             const dur = c.duration ? `${Math.floor(c.duration/60)}:${String(c.duration%60).padStart(2,'0')}` : '-';
             const fileId = c.telegram_file_id ? c.telegram_file_id.substring(0, 20) + '...' : '-';
+            const origFileId = c.original_telegram_file_id ? c.original_telegram_file_id.substring(0, 20) + '...' : '-';
             const botInfo = c.telegram_bot_user_id ? `#${c.telegram_bot_user_id}` : (c.telegram_bot_id != null ? `idx:${c.telegram_bot_id}` : '-');
             return `<tr>
                 <td>${c.chapter_order || '-'}</td>
@@ -218,12 +219,13 @@ async function loadChapters(page) {
                 <td>${dur}</td>
                 <td>${statusBadge(c.upload_status)}</td>
                 <td class="small text-muted">${fileId}</td>
+                <td class="small text-muted">${origFileId}</td>
                 <td class="small">${botInfo}</td>
                 <td>${c.worker_id ? c.worker_id.substring(0, 12) : '-'}</td>
                 <td><button class="btn btn-sm btn-outline-primary py-0" onclick="openEditChapter('${c.chapter_id}', ${JSON.stringify(c).replace(/"/g, '&quot;')})"><i class="bi bi-pencil"></i></button></td>
             </tr>`;
         }).join('');
-        document.getElementById('chapters-tbody').innerHTML = html || '<tr><td colspan="8" class="text-center text-muted">暂无章节</td></tr>';
+        document.getElementById('chapters-tbody').innerHTML = html || '<tr><td colspan="9" class="text-center text-muted">暂无章节</td></tr>';
         document.getElementById('chapters-info').textContent = `共 ${data.total} 条，第 ${data.page}/${Math.ceil(data.total / data.page_size)} 页`;
 
         const totalPages = Math.ceil(data.total / data.page_size);
