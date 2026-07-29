@@ -118,7 +118,7 @@ class ColabWorker:
         """后台心跳线程，每 30s 发送一次。"""
         while not self._heartbeat_stop.is_set():
             try:
-                self._get("/api/worker/heartbeat", {"worker_id": self.worker_id})
+                self._post("/api/worker/heartbeat", {"worker_id": self.worker_id})
             except Exception:
                 pass
             self._heartbeat_stop.wait(30)

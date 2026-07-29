@@ -13,6 +13,7 @@ from ..services.job_service import (
     fail_job,
     heartbeat,
     add_chapter_to_worker,
+    reset_job,
 )
 from ..database import fetch_all, fetch_one
 
@@ -136,6 +137,16 @@ def api_fail_job(job_id: int, req: JobFail,
         return {"ok": False, "error": "无权操作此任务"}
 
     return fail_job(job_id, req.error_message)
+
+
+# ═══════════════════════════════════════
+# 手动重置任务
+# ═══════════════════════════════════════
+
+@router.post("/jobs/{job_id}/reset")
+def api_reset_job(job_id: int):
+    """手动重置任务为 pending（Web UI 用，无需 worker_id 验证）。"""
+    return reset_job(job_id)
 
 
 # ═══════════════════════════════════════

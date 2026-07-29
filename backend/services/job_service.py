@@ -332,6 +332,45 @@ def fail_job(job_id: int, error_message: str) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════
+# 手动重置任务
+# ═══════════════════════════════════════════════════════════
+
+def reset_job(job_id: int) -> dict:
+    """手动重置任务为 pending，将未完成的章节重置为 pending。
+
+    用于处理卡在 processing 状态的任务（worker 崩溃/断线）。
+    """
+    job = fetch_one("SELECT book_id FROM public.xm_jobs WHERE job_id = %s", (job_id,))
+    if not job:
+        return {"ok": False, "error": "任务不存在"}
+
+    book_id = job["book_id"]
+
+    # 重置任务状态
+    execute(
+        sql.SQL("""
+            UPDATE public.xm_jobs
+            SET status = 'pending', worker_id = NULL, claimed_at = NULL,
+                finished_at = NULL, error_message = NULL
+            WHERE job_id = %s
+        """),
+        (job_id,),
+    )
+
+    # 重置未完成的章节（保留已上传的）
+    execute(
+        sql.SQL("""
+            UPDATE public.audiobook_chapters
+            SET upload_status = 'pending'
+            WHERE book_id = %s AND upload_status NOT IN ('uploaded',)
+        """),
+        (book_id,),
+    )
+
+    return {"ok": True, "job_id": job_id}
+
+
+# ═══════════════════════════════════════════════════════════
 # Worker 统计
 # ═══════════════════════════════════════════════════════════
 

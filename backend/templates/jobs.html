@@ -26,10 +26,10 @@
     <div class="table-responsive">
         <table class="table table-sm table-hover">
             <thead>
-                <tr><th>ID</th><th>专辑</th><th>类型</th><th>状态</th><th>进度</th><th>Worker</th><th>认领时间</th><th>完成时间</th></tr>
+                <tr><th>ID</th><th>专辑</th><th>类型</th><th>状态</th><th>进度</th><th>Worker</th><th>认领时间</th><th>完成时间</th><th>操作</th></tr>
             </thead>
             <tbody id="jobs-tbody">
-                <tr><td colspan="8" class="text-center text-muted">加载中...</td></tr>
+                <tr><td colspan="9" class="text-center text-muted">加载中...</td></tr>
             </tbody>
         </table>
     </div>
@@ -75,6 +75,9 @@ async function loadJobs(page) {
         const jobs = data.jobs || [];
         const html = jobs.map(j => {
             const progress = j.total_chapters > 0 ? `${j.done_chapters}/${j.total_chapters}` : '-';
+            const resetBtn = (j.status === 'processing' || j.status === 'failed')
+                ? `<button class="btn btn-sm btn-outline-warning py-0 px-1" onclick="resetJob(${j.job_id}, '${(j.book_name || j.book_id || '').replace(/'/g, "\\'")}')" title="重置为待处理"><i class="bi bi-arrow-clockwise"></i></button>`
+                : '';
             return `<tr>
                 <td>${j.job_id}</td>
                 <td>${j.book_name || j.book_id || '-'}</td>
@@ -84,9 +87,10 @@ async function loadJobs(page) {
                 <td>${j.worker_id ? j.worker_id.substring(0, 12) : '-'}</td>
                 <td>${fmtTime(j.claimed_at)}</td>
                 <td>${fmtTime(j.finished_at)}</td>
+                <td>${resetBtn}</td>
             </tr>`;
         }).join('');
-        document.getElementById('jobs-tbody').innerHTML = html || '<tr><td colspan="8" class="text-center text-muted">暂无任务</td></tr>';
+        document.getElementById('jobs-tbody').innerHTML = html || '                <tr><td colspan="9" class="text-center text-muted">暂无任务</td></tr>';
         document.getElementById('jobs-info').textContent = `共 ${data.total} 条，第 ${data.page}/${Math.ceil(data.total / data.page_size)} 页`;
 
         const totalPages = Math.ceil(data.total / data.page_size);
@@ -116,6 +120,21 @@ async function doCreateJob() {
         }
     } catch (e) {
         showToast('创建失败: ' + e.message, 'danger');
+    }
+}
+
+async function resetJob(jobId, bookName) {
+    if (!confirm(`确定重置任务 #${jobId}（${bookName}）为待处理状态？\n未上传的章节将重置为 pending。`)) return;
+    try {
+        const data = await api(`/api/jobs/${jobId}/reset`, { method: 'POST' });
+        if (data.ok) {
+            showToast(`任务 #${jobId} 已重置为待处理`, 'success');
+            loadJobs(currentJobPage);
+        } else {
+            showToast('重置失败: ' + (data.error || '未知错误'), 'danger');
+        }
+    } catch (e) {
+        showToast('重置失败: ' + e.message, 'danger');
     }
 }
 
