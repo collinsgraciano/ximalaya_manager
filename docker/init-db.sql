@@ -163,7 +163,7 @@ INSERT INTO public.global_settings (setting_key, setting_value, description, is_
     ('TG_UPLOAD_INTERVAL', '3', 'TG上传间隔秒数', false),
     ('PROXY_ENABLED', 'false', '是否启用代理（采集和下载均通过代理）', false),
     ('PROXY_LIST', '', '代理列表（手动填写）。每行一个，格式 http://ip:port 或 socks5://ip:port。留空则自动从下方URL获取', false),
-    ('PROXY_LIST_URL', 'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text&country=cn', '自动获取代理列表的URL（当 PROXY_LIST 为空时使用）', false),
+    ('PROXY_LIST_URL', 'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text&country=cn,https://raw.githubusercontent.com/HankNovic/ProxyClean/refs/heads/main/SOCKS5.txt', '自动获取代理列表的URL（当 PROXY_LIST 为空时使用）。多个URL用英文逗号分隔', false),
     ('PROXY_VERIFY_COUNTRY', '中国', '验证代理所在国家（通过 ip-api.com 检测）。填国家名如 中国/China，留空则不验证国家', false),
     ('PROXY_MAX_TESTS', '100', '自动发现时代理最大测试数量', false),
     ('PROXY_REFRESH_HOURS', '2', '定时自动刷新代理池的间隔（小时）。每隔此时长从URL获取新代理去重合并', false),

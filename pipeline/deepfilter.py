@@ -30,11 +30,13 @@ DEEPFILTER_DOWNLOAD_URL = (
 
 # 可选模型: DeepFilterNet2 (v2, RTF≈0.08, 推荐, 二进制内置默认),
 #            DeepFilterNet3 (v3, 质量最高, RTF≈0.10, 需下载 tar.gz)
+#            GTCRN (超轻量, RTF≈0.045, sherpa-onnx, 16kHz)
 # 注: Rust 二进制的 -m 需要 tar.gz 文件路径, 不是模型名。
 #     DeepFilterNet2 是二进制内置默认, 不需要 -m。
 #     DeepFilterNet3 需下载 DeepFilterNet3_onnx.tar.gz 并传路径。
+#     GTCRN 使用 sherpa-onnx Python API, 不需要 deep-filter 二进制。
 DEFAULT_MODEL = "DeepFilterNet2"
-VALID_MODELS = {"DeepFilterNet2", "DeepFilterNet3"}
+VALID_MODELS = {"DeepFilterNet2", "DeepFilterNet3", "GTCRN"}
 
 # DeepFilterNet3 模型 tar.gz 下载地址 (Rust 二进制用)
 DF3_MODEL_URL = (
@@ -42,6 +44,13 @@ DF3_MODEL_URL = (
     "models/DeepFilterNet3_onnx.tar.gz"
 )
 DF3_MODEL_PATH = os.path.join(_DEEPFILTER_DIR, "DeepFilterNet3_onnx.tar.gz")
+
+# GTCRN 模型 (sherpa-onnx, 16kHz, 48K 参数)
+GTCRN_MODEL_URL = (
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+    "speech-enhancement-models/gtcrn_simple.onnx"
+)
+GTCRN_MODEL_PATH = os.path.join(_DEEPFILTER_DIR, "gtcrn_simple.onnx")
 
 
 def setup_deep_filter():
@@ -97,11 +106,69 @@ def _ensure_model(model: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════
+# GTCRN 降噪 (sherpa-onnx, 16kHz, 无需 deep-filter 二进制)
+# ═══════════════════════════════════════════════════════════
+
+def _ensure_gtcrn():
+    """确保 GTCRN 模型和 sherpa-onnx 就绪, 返回 (denoiser, sample_rate)。"""
+    if not os.path.exists(GTCRN_MODEL_PATH) or os.path.getsize(GTCRN_MODEL_PATH) == 0:
+        os.makedirs(_DEEPFILTER_DIR, exist_ok=True)
+        logger.info("下载 GTCRN 模型...")
+        subprocess.run(
+            ["wget", "--tries=5", "--timeout=30", "--retry-connrefused",
+             GTCRN_MODEL_URL, "-O", GTCRN_MODEL_PATH],
+            check=True,
+        )
+        logger.info("GTCRN 模型下载完成")
+
+    import sherpa_onnx
+    config = sherpa_onnx.OfflineSpeechDenoiserConfig(
+        model=sherpa_onnx.OfflineSpeechDenoiserModelConfig(
+            gtcrn=sherpa_onnx.OfflineSpeechDenoiserGtcrnModelConfig(
+                model=GTCRN_MODEL_PATH
+            ),
+            debug=False,
+            num_threads=1,
+            provider="cpu",
+        )
+    )
+    if not config.validate():
+        raise RuntimeError("GTCRN 配置无效")
+    denoiser = sherpa_onnx.OfflineSpeechDenoiser(config)
+    return denoiser
+
+
+def _gtcrn_denoise(audio_path: str, output_wav: str) -> str:
+    """用 GTCRN 降噪, 输出 16kHz WAV。"""
+    import numpy as np
+    import soundfile as sf
+
+    # 转为 16kHz mono WAV 临时文件
+    tmp_16k = output_wav.replace(".wav", "_16k_input.wav")
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", audio_path, "-ar", "16000", "-ac", "1",
+         "-sample_fmt", "s16", "-acodec", "pcm_s16le", tmp_16k],
+        capture_output=True, check=True,
+    )
+
+    data, sr = sf.read(tmp_16k, always_2d=True, dtype="float32")
+    samples = np.ascontiguousarray(data[:, 0])
+
+    denoiser = _ensure_gtcrn()
+    result = denoiser(samples, sr)
+
+    sf.write(output_wav, result.samples, result.sample_rate)
+    os.unlink(tmp_16k)
+    logger.info(f"GTCRN 降噪完成: {output_wav}")
+    return output_wav
+
+
+# ═══════════════════════════════════════════════════════════
 # 音频分片处理
 # ═══════════════════════════════════════════════════════════
 
-def _split_audio_to_wav(input_file: str, output_dir: str, seg_minutes: int = 60, sr: int = 16000):
-    """将长音频分片为 WAV 段。"""
+def _split_audio_to_wav(input_file: str, output_dir: str, seg_minutes: int = 60, sr: int = 48000):
+    """将长音频分片为 WAV 段。deep-filter 二进制要求 48kHz。"""
     r = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
          "-of", "default=noprint_wrappers=1:nokey=1", input_file],
@@ -190,9 +257,7 @@ def denoise_audio_keep_format(audio_path: str, output_path: str = "",
                               segment_minutes: int = 60,
                               model: str = DEFAULT_MODEL) -> str:
     """降噪并保持原始音频格式，返回输出路径。"""
-    if not os.path.exists(DEEP_FILTER_PATH):
-        if not setup_deep_filter():
-            raise RuntimeError("DeepFilter 二进制不可用且下载失败")
+    model = model if model in VALID_MODELS else DEFAULT_MODEL
 
     source = Path(audio_path)
     suffix = source.suffix.lower() or ".wav"
@@ -202,6 +267,44 @@ def denoise_audio_keep_format(audio_path: str, output_path: str = "",
     if target.exists() and target.stat().st_size > 0:
         logger.info(f"复用已降噪音频: {target.name}")
         return str(target)
+
+    # GTCRN 走 sherpa-onnx, 不需要 deep-filter 二进制
+    if model == "GTCRN":
+        job_dir = Path(tempfile.mkdtemp(prefix="gtcrn_job_"))
+        safe_stem = re.sub(r'[^\w\-]', '_', source.stem) if source.stem else "audio"
+        temp_wav = str(job_dir / f"denoised_{safe_stem}.wav")
+        try:
+            logger.info(f"开始 GTCRN 降噪: {source.name}")
+            _gtcrn_denoise(audio_path, temp_wav)
+        except Exception:
+            shutil.rmtree(job_dir, ignore_errors=True)
+            raise
+
+        os.makedirs(target.parent, exist_ok=True)
+        try:
+            if target.suffix.lower() == ".wav":
+                if target.exists():
+                    target.unlink()
+                shutil.move(temp_wav, str(target))
+            else:
+                cmd = ["ffmpeg", "-y", "-i", temp_wav]
+                if target.suffix.lower() == ".mp3":
+                    cmd += ["-codec:a", "libmp3lame", "-b:a", "192k"]
+                elif target.suffix.lower() in {".m4a", ".aac"}:
+                    cmd += ["-codec:a", "aac", "-b:a", "192k"]
+                else:
+                    cmd += ["-codec:a", "libmp3lame", "-b:a", "192k"]
+                cmd.append(str(target))
+                subprocess.run(cmd, capture_output=True, check=True)
+            logger.info(f"降噪音频已写回: {target.name}")
+            return str(target)
+        finally:
+            shutil.rmtree(job_dir, ignore_errors=True)
+
+    # DeepFilterNet2/3 走 Rust 二进制
+    if not os.path.exists(DEEP_FILTER_PATH):
+        if not setup_deep_filter():
+            raise RuntimeError("DeepFilter 二进制不可用且下载失败")
 
     temp_wav, job_dir = denoise_audio(audio_path, segment_minutes, model=model)
     os.makedirs(target.parent, exist_ok=True)

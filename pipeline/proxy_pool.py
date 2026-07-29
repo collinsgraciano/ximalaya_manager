@@ -48,6 +48,29 @@ def _test_proxy_china(proxy_full_str: str, timeout: int = 5) -> tuple[str, str] 
     return None
 
 
+def _fetch_proxy_list_from_url(url: str) -> list[str]:
+    """从单个 URL 获取代理列表，返回去重后的列表。"""
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        # 解析空格或换行分隔的列表
+        raw_list = [p.strip() for p in resp.text.replace("\n", " ").split(" ") if p.strip()]
+    except Exception as e:
+        logger.warning(f"获取代理列表失败 ({url}): {e}")
+        return []
+
+    # 补全协议前缀
+    normalized: list[str] = []
+    seen = set()
+    for p in raw_list:
+        if not p.startswith(("http://", "https://", "socks5://", "socks4://")):
+            p = f"http://{p}"
+        if p not in seen:
+            seen.add(p)
+            normalized.append(p)
+    return normalized
+
+
 def auto_discover_proxies(
     list_url: str,
     verify_country: str = "中国",
@@ -55,10 +78,10 @@ def auto_discover_proxies(
     timeout: int = 5,
     fallback_list: list[str] | None = None,
 ) -> list[str]:
-    """从 URL 获取代理列表，并发检测筛选中国代理。
+    """从一个或多个 URL 获取代理列表，并发检测筛选中国代理。
 
     Args:
-        list_url: 代理列表 API URL，返回 text（每行一个 ip:port 或 protocol://ip:port）
+        list_url: 代理列表 URL，多个用逗号或换行分隔。返回 text（每行一个 ip:port 或 protocol://ip:port）
         verify_country: 目标国家名（中英文均可），如 "中国" / "China"
         max_tests: 最多测试的候选代理数量
         timeout: 单个代理测试超时秒数
@@ -67,29 +90,32 @@ def auto_discover_proxies(
     Returns:
         筛选后的中国代理 URL 列表（可能为空）
     """
-    # 获取在线代理列表
-    try:
-        resp = requests.get(list_url, timeout=10)
-        resp.raise_for_status()
-        # 解析空格或换行分隔的列表
-        raw_list = [p.strip() for p in resp.text.replace("\n", " ").split(" ") if p.strip()]
-    except Exception as e:
-        logger.warning(f"获取在线代理列表失败: {e}")
-        raw_list = fallback_list or []
-
-    if not raw_list:
-        logger.warning("代理列表为空（在线获取失败且无备用列表）")
+    # 解析多个 URL（逗号或换行分隔）
+    urls = [u.strip() for u in list_url.replace("\n", ",").split(",") if u.strip()]
+    if not urls:
+        logger.warning("未配置代理列表 URL")
         return []
 
-    # 补全协议前缀（proxyscrape 返回的格式可能是 ip:port 或 http://ip:port）
-    normalized: list[str] = []
-    for p in raw_list:
-        if not p.startswith(("http://", "https://", "socks5://", "socks4://")):
-            p = f"http://{p}"
-        normalized.append(p)
+    # 从所有 URL 获取代理并合并去重
+    all_candidates: list[str] = []
+    seen = set()
+    for url in urls:
+        proxies_from_url = _fetch_proxy_list_from_url(url)
+        logger.info(f"从 {url} 获取 {len(proxies_from_url)} 个候选代理")
+        for p in proxies_from_url:
+            if p not in seen:
+                seen.add(p)
+                all_candidates.append(p)
 
-    test_list = normalized[:max_tests]
-    logger.info(f"共找到 {len(normalized)} 个候选代理, 正在验证前 {len(test_list)} 个 (筛选国家: {verify_country})...")
+    if not all_candidates:
+        logger.warning("代理列表为空（所有 URL 获取失败）")
+        if fallback_list:
+            all_candidates = list(fallback_list)
+        if not all_candidates:
+            return []
+
+    test_list = all_candidates[:max_tests]
+    logger.info(f"共 {len(all_candidates)} 个候选代理 (去重后), 正在验证前 {len(test_list)} 个 (筛选国家: {verify_country})...")
 
     found: list[str] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
