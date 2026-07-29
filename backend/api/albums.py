@@ -266,7 +266,7 @@ def api_fix_covers():
     from ..database import execute as db_execute, fetch_val
 
     affected = fetch_val(
-        "SELECT count(*) FROM public.books WHERE book_data->>'albumCover' LIKE '%imagev2.ximalaya.com%'"
+        "SELECT count(*) FROM public.books WHERE book_data->>'albumCover' LIKE '%%imagev2.ximalaya.com%%'"
     )
     if not affected:
         return {"ok": True, "fixed": 0, "message": "没有需要修复的封面"}
@@ -290,7 +290,7 @@ def api_fix_covers():
                 )
             ),
             updated_at = now()
-        WHERE book_data->>'albumCover' LIKE '%imagev2.ximalaya.com%'
+        WHERE book_data->>'albumCover' LIKE '%%imagev2.ximalaya.com%%'
         """
     )
     return {"ok": True, "fixed": affected}
