@@ -10,6 +10,9 @@
             <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#scrapeModal">
                 <i class="bi bi-cloud-download"></i> 采集分类
             </button>
+            <button class="btn btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#importUrlModal">
+                <i class="bi bi-link-45deg"></i> URL导入
+            </button>
             <button class="btn btn-outline-info" id="btn-scrape-all-tracks" onclick="startAllTracksScrape()">
                 <i class="bi bi-list-ol"></i> 获取全部章节
             </button>
@@ -198,6 +201,33 @@
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
                 <button type="button" class="btn btn-primary" id="scrape-btn" onclick="doScrape()">开始采集</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- URL 导入模态框 -->
+<div class="modal fade" id="importUrlModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">通过 URL 导入专辑</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted small mb-2">输入喜马拉雅专辑地址，系统将自动获取专辑信息并入库章节列表。</p>
+                <div class="input-group">
+                    <span class="input-group-text"><i class="bi bi-link-45deg"></i></span>
+                    <input type="text" class="form-control" id="import-url-input"
+                           placeholder="https://www.ximalaya.com/album/77789950">
+                </div>
+                <div id="import-url-result" class="mt-3" style="display:none"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                <button type="button" class="btn btn-primary" id="import-url-btn" onclick="doImportUrl()">
+                    <i class="bi bi-box-arrow-in-down"></i> 导入
+                </button>
             </div>
         </div>
     </div>
@@ -667,5 +697,56 @@ loadCategories().then(() => {
     checkScrapeStatus();
     checkTracksStatus();
 });
+
+// ═══════════════════════════════════════
+// URL 导入专辑
+// ═══════════════════════════════════════
+
+async function doImportUrl() {
+    const url = document.getElementById('import-url-input').value.trim();
+    const resultDiv = document.getElementById('import-url-result');
+    const btn = document.getElementById('import-url-btn');
+
+    if (!url) {
+        showToast('请输入专辑 URL', 'warning');
+        return;
+    }
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 导入中...';
+    resultDiv.style.display = 'none';
+
+    try {
+        const data = await api('/api/albums/import-url', {
+            method: 'POST',
+            body: JSON.stringify({ url }),
+        });
+
+        if (data.ok) {
+            resultDiv.className = 'mt-3 alert alert-success';
+            resultDiv.innerHTML = `
+                <strong>导入成功</strong><br>
+                专辑: ${data.album_title || '-'}<br>
+                章节数: ${data.total_tracks || 0} (入库 ${data.saved_tracks || 0})
+            `;
+            resultDiv.style.display = '';
+            showToast(`导入成功: ${data.total_tracks || 0} 章节`, 'success');
+            loadAlbums(1);
+        } else {
+            resultDiv.className = 'mt-3 alert alert-danger';
+            resultDiv.textContent = '导入失败: ' + (data.error || '未知错误');
+            resultDiv.style.display = '';
+            showToast('导入失败: ' + (data.error || ''), 'danger');
+        }
+    } catch (e) {
+        resultDiv.className = 'mt-3 alert alert-danger';
+        resultDiv.textContent = '导入失败: ' + e.message;
+        resultDiv.style.display = '';
+        showToast('导入失败: ' + e.message, 'danger');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-box-arrow-in-down"></i> 导入';
+    }
+}
 </script>
 {% endblock %}

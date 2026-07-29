@@ -560,6 +560,64 @@ def _scrape_background(categories: list[str], max_pages: int, sort: str,
             )
 
 
+def import_album_by_url(url: str) -> dict:
+    """通过喜马拉雅专辑 URL 导入专辑：获取专辑信息入库 + 获取章节列表。
+
+    支持的 URL 格式:
+      https://www.ximalaya.com/album/77789950
+      https://www.ximalaya.com/album/77789950/
+      纯数字 albumId: 77789950
+
+    返回:
+        {"ok": True, "book_id": ..., "album_title": ..., "total_tracks": ..., "saved_tracks": ...}
+    """
+    import re
+
+    # 从 URL 提取 albumId
+    match = re.search(r'album/(\d+)', url)
+    if match:
+        album_id = match.group(1)
+    elif url.strip().isdigit():
+        album_id = url.strip()
+    else:
+        return {"ok": False, "error": f"无法从 URL 解析专辑 ID: {url}"}
+
+    book_id = f"xm_{album_id}"
+
+    cookie = get_xm_cookie()
+    headers = _build_headers(cookie)
+    _, proxies = _init_proxy_pool()
+
+    # 获取专辑信息
+    album_info = _get_album_info(album_id, headers, proxies=proxies or None)
+    if not album_info:
+        return {"ok": False, "error": f"无法获取专辑信息 (albumId={album_id})"}
+
+    album_title = album_info.get("albumTitle", f"xm_{album_id}")
+    total_chapters = int(album_info.get("totalCount", 0))
+
+    # 入库 books 表（不存在则插入，存在则更新名称）
+    book_data = {
+        "albumId": album_id,
+        "albumUrl": f"https://www.ximalaya.com/album/{album_id}",
+    }
+    execute(
+        sql.SQL("""
+            INSERT INTO public.books (book_id, book_name, category, total_chapters, book_data, book_status, updated_at)
+            VALUES (%s, %s, '', %s, %s, 'pending', now())
+            ON CONFLICT (book_id) DO UPDATE SET
+                book_name = EXCLUDED.book_name,
+                total_chapters = EXCLUDED.total_chapters,
+                updated_at = now()
+        """),
+        (book_id, album_title, total_chapters, Jsonb(book_data)),
+    )
+
+    # 获取章节列表并入库
+    result = scrape_album_tracks(book_id, proxies=proxies or None)
+    return result
+
+
 def scrape_album_tracks(book_id: str, proxies: dict | None = None) -> dict:
     """获取专辑的所有章节列表并保存到数据库。
 

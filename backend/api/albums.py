@@ -11,6 +11,7 @@ from ..services.scrape_service import (
     get_scrape_status,
     stop_scrape,
     scrape_album_tracks,
+    import_album_by_url,
     get_albums,
     get_album_detail,
     get_album_chapters,
@@ -121,6 +122,25 @@ def api_scrape_tracks(book_id: str):
         return result
     except Exception as e:
         logger.error(f"章节采集失败: {e}", exc_info=True)
+        return {"ok": False, "error": str(e)}
+
+
+# ═══════════════════════════════════════
+# 通过 URL 导入专辑（获取专辑信息 + 章节列表）
+# ═══════════════════════════════════════
+
+class ImportUrlRequest(BaseModel):
+    url: str
+
+
+@router.post("/albums/import-url")
+def api_import_url(req: ImportUrlRequest):
+    """通过喜马拉雅专辑 URL 导入专辑并获取章节。"""
+    try:
+        result = import_album_by_url(req.url)
+        return result
+    except Exception as e:
+        logger.error(f"URL 导入失败: {e}", exc_info=True)
         return {"ok": False, "error": str(e)}
 
 
