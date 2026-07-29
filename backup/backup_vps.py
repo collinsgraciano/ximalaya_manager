@@ -7,7 +7,7 @@
 功能:
     1. SSH 进 VPS, pg_dump | gzip 导出压缩数据库
     2. 下载 .env + docker-compose.yml
-    3. 本地打包为单个 .tar.gz 归档
+    3. 保存到时间戳命名的文件夹 backup/archives/xm_backup_{timestamp}/
     4. 自动清理旧备份 (默认保留最近 7 份)
 
 依赖:
@@ -23,7 +23,6 @@
 import paramiko
 import sys
 import os
-import tarfile
 import shutil
 import argparse
 from datetime import datetime
@@ -74,19 +73,19 @@ def sftp_download(ssh, remote_path, local_path):
 
 
 def cleanup_old_backups(keep):
-    """清理旧备份, 只保留最近 keep 份 .tar.gz。"""
+    """清理旧备份, 只保留最近 keep 份文件夹。"""
     if not BACKUP_ROOT.exists():
         return []
 
-    files = sorted(
-        [f for f in BACKUP_ROOT.iterdir() if f.is_file() and f.name.startswith("xm_backup_") and f.suffix == ".gz"],
+    dirs = sorted(
+        [d for d in BACKUP_ROOT.iterdir() if d.is_dir() and d.name.startswith("xm_backup_")],
         reverse=True,
     )
 
     deleted = []
-    for f in files[keep:]:
-        f.unlink()
-        deleted.append(f.name)
+    for d in dirs[keep:]:
+        shutil.rmtree(d, ignore_errors=True)
+        deleted.append(d.name)
     return deleted
 
 
@@ -102,23 +101,24 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
 
-    # 临时工作目录
-    tmp_dir = BACKUP_ROOT / f"tmp_{timestamp}"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
+    # 时间戳备份文件夹 (直接保存, 不打包)
+    backup_dir = BACKUP_ROOT / f"xm_backup_{timestamp}"
+    backup_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[{timestamp}] 开始备份 ximalaya_manager")
-    print(f"  VPS: {VPS_HOST}")
-    print()
+    print(f"[{timestamp}] 开始备份 ximalaya_manager", flush=True)
+    print(f"  VPS: {VPS_HOST}", flush=True)
+    print(f"  备份目录: {backup_dir}", flush=True)
+    print(flush=True)
 
     # ── 连接 VPS ──
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    print("连接 SSH ...")
+    print("连接 SSH ...", flush=True)
     ssh.connect(VPS_HOST, port=VPS_PORT, username=VPS_USER, password=VPS_PASS, timeout=15)
-    print("SSH 连接成功")
+    print("SSH 连接成功", flush=True)
 
     # ── Step 1: pg_dump | gzip 导出数据库 ──
-    print("\n=== 1/3 导出数据库 (gzip 压缩) ===")
+    print("\n=== 1/3 导出数据库 (gzip 压缩) ===", flush=True)
     dump_cmd = (
         f"docker exec {CONTAINER_NAME} "
         f"pg_dump -U {DB_USER} -d {DB_NAME} --no-owner --no-privileges"
@@ -126,72 +126,62 @@ def main():
     )
     exit_code, out, err = run_remote(ssh, dump_cmd, timeout=300)
     if exit_code != 0:
-        print(f"  FAIL: pg_dump 退出码 {exit_code}")
-        print(f"  stderr: {err}")
+        print(f"  FAIL: pg_dump 退出码 {exit_code}", flush=True)
+        print(f"  stderr: {err}", flush=True)
         ssh.close()
         sys.exit(1)
 
     _, size_out, _ = run_remote(ssh, f"stat -c%s {REMOTE_DUMP_GZ} 2>/dev/null || echo 0")
     dump_bytes = int(size_out) if size_out.strip().isdigit() else 0
-    print(f"  OK: 远程压缩 dump {dump_bytes / 1024:.0f} KB")
+    print(f"  OK: 远程压缩 dump {dump_bytes / 1024:.0f} KB", flush=True)
 
-    local_dump_gz = tmp_dir / "db_dump.sql.gz"
-    print(f"  下载中 ...")
+    local_dump_gz = backup_dir / "db_dump.sql.gz"
+    print(f"  下载中 ...", flush=True)
     sftp_download(ssh, REMOTE_DUMP_GZ, local_dump_gz)
-    print(f"  OK: {local_dump_gz.name} ({local_dump_gz.stat().st_size / 1024:.0f} KB)")
+    print(f"  OK: {local_dump_gz.name} ({local_dump_gz.stat().st_size / 1024:.0f} KB)", flush=True)
 
     run_remote(ssh, f"rm -f {REMOTE_DUMP_GZ}")
 
     # ── Step 2: 下载 .env ──
-    print("\n=== 2/3 下载 .env ===")
-    local_env = tmp_dir / ".env"
+    print("\n=== 2/3 下载 .env ===", flush=True)
+    local_env = backup_dir / ".env"
     try:
         sftp_download(ssh, REMOTE_ENV, local_env)
-        print(f"  OK: .env ({local_env.stat().st_size} bytes)")
+        print(f"  OK: .env ({local_env.stat().st_size} bytes)", flush=True)
     except Exception as e:
-        print(f"  WARN: 下载 .env 失败: {e}")
-        local_env = None
+        print(f"  WARN: 下载 .env 失败: {e}", flush=True)
 
     # ── Step 3: 下载 docker-compose.yml ──
-    print("\n=== 3/3 下载 docker-compose.yml ===")
-    local_compose = tmp_dir / "docker-compose.yml"
+    print("\n=== 3/3 下载 docker-compose.yml ===", flush=True)
+    local_compose = backup_dir / "docker-compose.yml"
     try:
         sftp_download(ssh, REMOTE_COMPOSE, local_compose)
-        print(f"  OK: docker-compose.yml")
+        print(f"  OK: docker-compose.yml", flush=True)
     except Exception as e:
-        print(f"  WARN: 下载 docker-compose.yml 失败: {e}")
+        print(f"  WARN: 下载 docker-compose.yml 失败: {e}", flush=True)
 
     ssh.close()
 
-    # ── 打包为 .tar.gz ──
-    archive_name = f"xm_backup_{timestamp}.tar.gz"
-    archive_path = BACKUP_ROOT / archive_name
-    print(f"\n=== 打包归档 ===")
-    with tarfile.open(str(archive_path), "w:gz") as tar:
-        for f in tmp_dir.iterdir():
-            tar.add(str(f), arcname=f.name)
-    print(f"  OK: {archive_name} ({archive_path.stat().st_size / 1024:.0f} KB)")
-
-    # 清理临时目录
-    shutil.rmtree(tmp_dir, ignore_errors=True)
-
     # ── 汇总 ──
-    total_mb = archive_path.stat().st_size / (1024 * 1024)
-    print(f"\n=== 备份完成 ===")
-    print(f"  文件: {archive_path}")
-    print(f"  大小: {total_mb:.2f} MB")
+    total_kb = sum(f.stat().st_size for f in backup_dir.iterdir() if f.is_file()) / 1024
+    print(f"\n=== 备份完成 ===", flush=True)
+    print(f"  目录: {backup_dir}", flush=True)
+    print(f"  大小: {total_kb:.0f} KB", flush=True)
+    print(f"  文件:", flush=True)
+    for f in sorted(backup_dir.iterdir()):
+        print(f"    {f.name} ({f.stat().st_size / 1024:.0f} KB)", flush=True)
 
     # ── 清理旧备份 ──
     if not args.no_cleanup:
         deleted = cleanup_old_backups(args.keep)
         if deleted:
-            print(f"\n=== 清理旧备份 (保留最近 {args.keep} 份) ===")
+            print(f"\n=== 清理旧备份 (保留最近 {args.keep} 份) ===", flush=True)
             for d in deleted:
-                print(f"  删除: {d}")
+                print(f"  删除: {d}", flush=True)
         else:
-            print(f"\n  旧备份数未超过 {args.keep}, 无需清理")
+            print(f"\n  旧备份数未超过 {args.keep}, 无需清理", flush=True)
 
-    print("\nDone!")
+    print("\nDone!", flush=True)
 
 
 if __name__ == "__main__":

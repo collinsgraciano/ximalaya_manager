@@ -28,10 +28,20 @@ DEEPFILTER_DOWNLOAD_URL = (
     "deep-filter-0.5.6-x86_64-unknown-linux-musl"
 )
 
-# 可选模型: DeepFilterNet (v1, RTF≈0.19), DeepFilterNet2 (v2, RTF≈0.08, 推荐),
-#            DeepFilterNet3 (v3, 质量最高, RTF≈0.10)
+# 可选模型: DeepFilterNet2 (v2, RTF≈0.08, 推荐, 二进制内置默认),
+#            DeepFilterNet3 (v3, 质量最高, RTF≈0.10, 需下载 tar.gz)
+# 注: Rust 二进制的 -m 需要 tar.gz 文件路径, 不是模型名。
+#     DeepFilterNet2 是二进制内置默认, 不需要 -m。
+#     DeepFilterNet3 需下载 DeepFilterNet3_onnx.tar.gz 并传路径。
 DEFAULT_MODEL = "DeepFilterNet2"
-VALID_MODELS = {"DeepFilterNet", "DeepFilterNet2", "DeepFilterNet3"}
+VALID_MODELS = {"DeepFilterNet2", "DeepFilterNet3"}
+
+# DeepFilterNet3 模型 tar.gz 下载地址 (Rust 二进制用)
+DF3_MODEL_URL = (
+    "https://raw.githubusercontent.com/Rikorose/DeepFilterNet/main/"
+    "models/DeepFilterNet3_onnx.tar.gz"
+)
+DF3_MODEL_PATH = os.path.join(_DEEPFILTER_DIR, "DeepFilterNet3_onnx.tar.gz")
 
 
 def setup_deep_filter():
@@ -56,6 +66,34 @@ def setup_deep_filter():
     except Exception as e:
         logger.error(f"DeepFilter 下载失败: {e}")
         return False
+
+
+def _ensure_model(model: str) -> str:
+    """返回传递给 deep-filter -m 的参数值, 或空字符串表示用默认模型。
+
+    DeepFilterNet2 是二进制内置默认, 不需要 -m。
+    DeepFilterNet3 需要下载 tar.gz 并返回其路径。
+    """
+    if model == "DeepFilterNet2":
+        return ""  # 二进制默认就是 DeepFilterNet2
+
+    if model == "DeepFilterNet3":
+        if os.path.exists(DF3_MODEL_PATH) and os.path.getsize(DF3_MODEL_PATH) > 0:
+            return DF3_MODEL_PATH
+        logger.info("下载 DeepFilterNet3 模型...")
+        try:
+            subprocess.run(
+                ["wget", "--tries=5", "--timeout=30", "--retry-connrefused",
+                 DF3_MODEL_URL, "-O", DF3_MODEL_PATH],
+                check=True,
+            )
+            logger.info("DeepFilterNet3 模型下载完成")
+            return DF3_MODEL_PATH
+        except Exception as e:
+            logger.error(f"DeepFilterNet3 模型下载失败, 回退到 DeepFilterNet2: {e}")
+            return ""
+
+    return ""
 
 
 # ═══════════════════════════════════════════════════════════
@@ -87,7 +125,11 @@ def _split_audio_to_wav(input_file: str, output_dir: str, seg_minutes: int = 60,
 
 def _df_process_wav(wav_file: str, output_dir: str, model: str = DEFAULT_MODEL) -> str:
     """用 DeepFilter 处理单个 WAV 段。"""
-    cmd = [DEEP_FILTER_PATH, "-m", model, wav_file, "--output-dir", output_dir]
+    model_path = _ensure_model(model)
+    cmd = [DEEP_FILTER_PATH]
+    if model_path:
+        cmd += ["-m", model_path]
+    cmd += [wav_file, "--output-dir", output_dir]
     subprocess.run(cmd, check=True)
     return os.path.join(output_dir, os.path.basename(wav_file))
 

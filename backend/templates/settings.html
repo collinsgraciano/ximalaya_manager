@@ -148,7 +148,6 @@ function renderSettingGroup(name, items) {
         // DEEPFILTER_MODEL 渲染为下拉选择
         if (s.setting_key === 'DEEPFILTER_MODEL') {
             const models = [
-                {value: 'DeepFilterNet', label: 'DeepFilterNet (v1, 较慢, RTF≈0.19)'},
                 {value: 'DeepFilterNet2', label: 'DeepFilterNet2 (v2, 推荐, RTF≈0.08)'},
                 {value: 'DeepFilterNet3', label: 'DeepFilterNet3 (v3, 质量最高, RTF≈0.10)'},
             ];

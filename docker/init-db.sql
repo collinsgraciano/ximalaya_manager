@@ -151,7 +151,7 @@ INSERT INTO public.global_settings (setting_key, setting_value, description, is_
     ('TG_CHAT_ID', '', 'Telegram Chat ID（音频上传目标聊天/频道ID）', false),
     ('XM_COOKIE', '', '喜马拉雅 Cookie（用于下载付费专辑，需含 1&_token）', true),
     ('ENABLE_DEEPFILTER', 'true', '是否启用 DeepFilter 降噪（Colab 端使用）', false),
-    ('DEEPFILTER_MODEL', 'DeepFilterNet2', 'DeepFilter 降噪模型。可选: DeepFilterNet(v1, 较慢), DeepFilterNet2(v2, 推荐速度快), DeepFilterNet3(v3, 质量最高)', false),
+    ('DEEPFILTER_MODEL', 'DeepFilterNet2', 'DeepFilter 降噪模型。可选: DeepFilterNet2(v2, 推荐速度快), DeepFilterNet3(v3, 质量最高)', false),
     ('DEEPFILTER_SEGMENT_MINUTES', '60', 'DeepFilter 音频分片时长（分钟）', false),
     ('DOWNLOAD_INTERVAL', '1.5', '下载间隔秒数', false),
     ('TG_SERIAL_UPLOAD', 'true', '是否串行上传到TG（避免限流）', false),

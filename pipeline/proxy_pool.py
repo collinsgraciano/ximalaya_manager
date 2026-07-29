@@ -222,9 +222,8 @@ class ProxyPool:
                 added += 1
                 logger.info(f"[补充检测] 新代理可用: {proxy_url} (延迟 {latency:.2f}s)")
             else:
-                with self._lock:
-                    self._all_proxies.remove(proxy_url) if proxy_url in self._all_proxies else None
-                    self._latency_map.pop(proxy_url, None)
+                # 检测失败 → 踢出（触发 on_dead 回调更新 DB 缓存）
+                self.mark_dead(proxy_url)
 
         # 重新排序
         with self._lock:

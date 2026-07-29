@@ -260,7 +260,7 @@ def _init_proxy_pool():
     proxy_list_raw = settings_map.get("PROXY_LIST", "")
     proxy_list = [line.strip() for line in proxy_list_raw.splitlines() if line.strip()]
 
-    # 模式1: 手动列表有值 → 直接用（不缓存）
+    # 模式1: 手动列表有值 → 检测一次后用
     if proxy_list:
         init_pool(proxy_list=proxy_list, test_url=test_url,
                   dead_retry_minutes=dead_retry_minutes, timeout=timeout,
@@ -276,6 +276,7 @@ def _init_proxy_pool():
 
     # 模式2/3: 手动列表为空 → 读缓存或自动发现
     cached_proxies = None
+    from_url = False
 
     cache_raw = settings_map.get("PROXY_VERIFIED_CACHE", "")
     if cache_raw:
@@ -287,48 +288,51 @@ def _init_proxy_pool():
         except Exception as e:
             logger.warning(f"解析代理缓存失败: {e}")
 
-    # 缓存为空 → 自动发现
+    # 缓存为空 → 从 URL 自动发现
     if not cached_proxies:
         cached_proxies = _auto_discover_and_cache(settings_map, timeout)
         if not cached_proxies:
             return False, {}
+        from_url = True
 
     init_pool(proxy_list=cached_proxies, test_url=test_url,
               dead_retry_minutes=dead_retry_minutes, timeout=timeout,
               on_dead=_on_proxy_dead)
 
-    # 健康检测（仅一次）
-    pool = get_pool()
-    if pool:
-        stats = pool.health_check()
-        logger.info(f"代理池健康检测: {stats['alive']}/{stats['total']} 可用")
+    # 只有从 URL 获取时才做一次 health_check，缓存复用直接用
+    if from_url:
+        pool = get_pool()
+        if pool:
+            stats = pool.health_check()
+            logger.info(f"代理池健康检测(从URL获取): {stats['alive']}/{stats['total']} 可用")
 
-        # health_check 后把存活的代理回写缓存，踢除已失效的
-        if stats["dead"] > 0 and pool._sorted_proxies:
-            _persist_alive_proxies(list(pool._sorted_proxies))
-            logger.info(f"已更新缓存: 踢除 {stats['dead']} 个失效代理, 保留 {len(pool._sorted_proxies)} 个")
+            if stats["dead"] > 0 and pool._sorted_proxies:
+                _persist_alive_proxies(list(pool._sorted_proxies))
+                logger.info(f"已更新缓存: 踢除 {stats['dead']} 个失效代理, 保留 {len(pool._sorted_proxies)} 个")
 
-        # 全部失效 → 清缓存重新发现
-        if stats["alive"] == 0 and stats["total"] > 0:
-            logger.warning("所有缓存代理已失效，重新发现...")
-            execute(
-                sql.SQL("UPDATE public.global_settings SET setting_value = '' WHERE setting_key = 'PROXY_VERIFIED_CACHE'"),
-                (),
-            )
-            new_proxies = _auto_discover_and_cache(settings_map, timeout)
-            if new_proxies:
-                init_pool(proxy_list=new_proxies, test_url=test_url,
-                          dead_retry_minutes=dead_retry_minutes, timeout=timeout,
-                          on_dead=_on_proxy_dead)
-                pool = get_pool()
-                if pool:
-                    stats = pool.health_check()
-                    logger.info(f"重新发现后健康检测: {stats['alive']}/{stats['total']} 可用")
-                    if pool._sorted_proxies:
-                        _persist_alive_proxies(list(pool._sorted_proxies))
-            else:
-                logger.warning("重新发现代理失败，使用直连")
-                return False, {}
+            # 全部失效 → 清缓存重新发现
+            if stats["alive"] == 0 and stats["total"] > 0:
+                logger.warning("所有代理已失效，重新发现...")
+                execute(
+                    sql.SQL("UPDATE public.global_settings SET setting_value = '' WHERE setting_key = 'PROXY_VERIFIED_CACHE'"),
+                    (),
+                )
+                new_proxies = _auto_discover_and_cache(settings_map, timeout)
+                if new_proxies:
+                    init_pool(proxy_list=new_proxies, test_url=test_url,
+                              dead_retry_minutes=dead_retry_minutes, timeout=timeout,
+                              on_dead=_on_proxy_dead)
+                    pool = get_pool()
+                    if pool:
+                        stats = pool.health_check()
+                        logger.info(f"重新发现后健康检测: {stats['alive']}/{stats['total']} 可用")
+                        if pool._sorted_proxies:
+                            _persist_alive_proxies(list(pool._sorted_proxies))
+                else:
+                    logger.warning("重新发现代理失败，使用直连")
+                    return False, {}
+    else:
+        logger.info(f"缓存代理直接启用: {len(cached_proxies)} 个 (跳过健康检测)")
 
     # 启动后台代理刷新线程（定时自动发现新代理合并到池）
     _start_proxy_refresh_thread()
