@@ -68,7 +68,26 @@ SORT_MAP = {
 # 每页专辑数 (API 最大 50)
 ALBUMS_PER_PAGE = 50
 
-QUALITY_PRIORITY = ["M4A_128", "M4A_64", "MP3_64", "MP3_32", "M4A_24"]
+QUALITY_PRIORITY = ["M4A_24", "MP3_32", "MP3_64", "M4A_64", "M4A_128"]
+
+# 所有可选音质
+ALL_QUALITIES = ["M4A_24", "MP3_32", "MP3_64", "M4A_64", "M4A_128"]
+
+def parse_quality_priority(quality_str: str | None) -> list[str]:
+    """将逗号分隔的音质字符串解析为优先级列表。
+
+    无效值会被过滤，未列出的音质追加到末尾作为兜底。
+    """
+    if not quality_str or not quality_str.strip():
+        return list(QUALITY_PRIORITY)
+    parts = [q.strip().upper() for q in quality_str.split(",") if q.strip()]
+    # 过滤无效值
+    valid = [q for q in parts if q in ALL_QUALITIES]
+    # 追加未列出的有效音质作为兜底
+    for q in ALL_QUALITIES:
+        if q not in valid:
+            valid.append(q)
+    return valid
 
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -517,7 +536,8 @@ def get_album_info(album_id: str, headers: dict | None = None,
 
 def get_download_url(track_id: str, headers: dict | None = None,
                      max_retries: int = 3,
-                     proxies: dict | None = None) -> tuple[str | None, int]:
+                     proxies: dict | None = None,
+                     quality_priority: list[str] | None = None) -> tuple[str | None, int]:
     """通过 mobile-playpage API 获取音频下载 URL。
 
     返回 (url, file_size) 或 (None, 0)
@@ -542,8 +562,9 @@ def get_download_url(track_id: str, headers: dict | None = None,
             play_urls = track_info.get("playUrlList", [])
 
             # 按质量优先级选择
+            qp = quality_priority or QUALITY_PRIORITY
             play_url_map = {pu.get("type"): pu for pu in play_urls if isinstance(pu, dict)}
-            for quality in QUALITY_PRIORITY:
+            for quality in qp:
                 pu = play_url_map.get(quality)
                 if pu and pu.get("url"):
                     url = crack_playurl(pu["url"])
@@ -570,7 +591,8 @@ def get_download_url(track_id: str, headers: dict | None = None,
 
 def download_track(track_id: str, save_path: str, headers: dict | None = None,
                    max_retries: int = 3,
-                   proxies: dict | None = None) -> tuple[str, int]:
+                   proxies: dict | None = None,
+                   quality_priority: list[str] | None = None) -> tuple[str, int]:
     """下载单集音频到指定路径，返回 (status, file_size)。
 
     status: "downloaded" / "skipped" / "no_url" / "download_failed"
@@ -581,7 +603,8 @@ def download_track(track_id: str, save_path: str, headers: dict | None = None,
     if os.path.exists(save_path) and os.path.getsize(save_path) > 1000:
         return "skipped", os.path.getsize(save_path)
 
-    download_url, file_size = get_download_url(track_id, headers, max_retries=max_retries, proxies=proxies)
+    download_url, file_size = get_download_url(track_id, headers, max_retries=max_retries,
+                                                proxies=proxies, quality_priority=quality_priority)
     if not download_url:
         return "no_url", 0
 

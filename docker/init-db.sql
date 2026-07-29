@@ -164,5 +164,6 @@ INSERT INTO public.global_settings (setting_key, setting_value, description, is_
     ('PROXY_VERIFIED_CACHE', '', '系统内部使用：缓存的已验证代理列表（JSON），请勿手动修改', false),
     ('PROXY_TEST_URL', 'https://www.ximalaya.com', '代理健康检测URL', false),
     ('PROXY_DEAD_RETRY_MINUTES', '5', '死亡代理重试间隔（分钟）', false),
-    ('PROXY_TIMEOUT', '10', '代理请求超时秒数', false)
+    ('PROXY_TIMEOUT', '10', '代理请求超时秒数', false),
+    ('XM_AUDIO_QUALITY', 'M4A_24', '下载音质优先级（从左到右依次尝试）。可选值：M4A_24, MP3_32, MP3_64, M4A_64, M4A_128。多个用逗号分隔，如 M4A_24,MP3_32,M4A_128', false)
 ON CONFLICT (setting_key) DO NOTHING;

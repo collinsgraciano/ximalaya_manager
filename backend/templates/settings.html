@@ -71,7 +71,7 @@
 <script>
 const SETTING_GROUPS = {
     'Telegram': ['TG_BOT_TOKEN', 'TG_CHAT_ID', 'TG_SERIAL_UPLOAD', 'TG_UPLOAD_INTERVAL'],
-    '喜马拉雅': ['XM_COOKIE', 'DOWNLOAD_INTERVAL'],
+    '喜马拉雅': ['XM_COOKIE', 'DOWNLOAD_INTERVAL', 'XM_AUDIO_QUALITY'],
     '代理': ['PROXY_ENABLED', 'PROXY_LIST', 'PROXY_LIST_URL', 'PROXY_VERIFY_COUNTRY', 'PROXY_MAX_TESTS', 'PROXY_REFRESH_HOURS', 'PROXY_TEST_URL', 'PROXY_DEAD_RETRY_MINUTES', 'PROXY_TIMEOUT'],
     'DeepFilter': ['ENABLE_DEEPFILTER', 'DEEPFILTER_SEGMENT_MINUTES'],
 };
@@ -100,6 +100,7 @@ async function loadSettings() {
         }
 
         document.getElementById('settings-fields').innerHTML = html || '<div class="text-muted">暂无设置项</div>';
+        bindQualityCheckboxes();
     } catch (e) {
         showToast('加载失败: ' + e.message, 'danger');
     }
@@ -122,6 +123,28 @@ function renderSettingGroup(name, items) {
             </div>`;
         }
 
+        // XM_AUDIO_QUALITY 渲染为逗号分隔的复选框组
+        if (s.setting_key === 'XM_AUDIO_QUALITY') {
+            const allQualities = ['M4A_24', 'MP3_32', 'MP3_64', 'M4A_64', 'M4A_128'];
+            const selected = val.split(',').map(q => q.trim().toUpperCase()).filter(q => q);
+            const checkboxes = allQualities.map((q, i) => {
+                const checked = selected.includes(q) ? 'checked' : '';
+                return `<div class="form-check form-check-inline">
+                    <input class="form-check-input quality-cb" type="checkbox" value="${q}" ${checked} data-order="${i}">
+                    <label class="form-check-label small">${q}</label>
+                </div>`;
+            }).join('');
+            return `<div class="mb-2">
+                <label class="form-label small mb-1">
+                    ${s.setting_key}
+                    ${s.description ? `<span class="text-muted"> — ${s.description}</span>` : ''}
+                </label>
+                <div>${checkboxes}</div>
+                <input type="hidden" data-key="${s.setting_key}" class="quality-hidden" value="${val}">
+                <div class="text-muted small mt-1">勾选并按顺序排列优先级（从左到右）</div>
+            </div>`;
+        }
+
         return `<div class="mb-2">
             <label class="form-label small mb-1">
                 ${s.setting_key}
@@ -135,6 +158,21 @@ function renderSettingGroup(name, items) {
         </div>`;
     }).join('');
     return `<div class="mb-4"><h6 class="border-bottom pb-2">${name}</h6>${fields}</div>`;
+}
+
+function bindQualityCheckboxes() {
+    document.querySelectorAll('.quality-cb').forEach(cb => {
+        cb.addEventListener('change', () => {
+            const container = cb.closest('.mb-2');
+            const checkboxes = container.querySelectorAll('.quality-cb');
+            // 按 data-order 排序收集选中的
+            const selected = Array.from(checkboxes)
+                .filter(c => c.checked)
+                .sort((a, b) => parseInt(a.dataset.order) - parseInt(b.dataset.order))
+                .map(c => c.value);
+            container.querySelector('.quality-hidden').value = selected.join(',');
+        });
+    });
 }
 
 function togglePassword(btn) {
@@ -216,6 +254,7 @@ async function previewConfig() {
             ['proxy_test_url', cfg.proxy_test_url || 'https://www.ximalaya.com'],
             ['proxy_dead_retry_minutes', cfg.proxy_dead_retry_minutes],
             ['proxy_timeout', cfg.proxy_timeout],
+            ['audio_quality', cfg.audio_quality || 'M4A_24'],
         ];
         let html = '<table class="table table-sm"><tbody>';
         for (const [k, v] of rows) {

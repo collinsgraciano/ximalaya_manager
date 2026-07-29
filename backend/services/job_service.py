@@ -10,8 +10,12 @@ from ..database import fetch_one, fetch_all, execute, execute_returning, fetch_v
 
 logger = logging.getLogger(__name__)
 
-# 超时任务自动回收阈值（分钟）
-STALE_JOB_TIMEOUT_MINUTES = 30
+# 超时任务自动回收阈值：心跳 30s 一次，90s 没心跳 = worker 已死
+STALE_JOB_HEARTBEAT_SECONDS = 90
+# 兜底：认领超过此分钟数无论如何回收（防止 worker_stats 表丢失记录）
+STALE_JOB_FALLBACK_MINUTES = 60
+# 最大重试次数
+MAX_RETRIES = 3
 
 
 # ═══════════════════════════════════════════════════════════
@@ -91,17 +95,25 @@ def create_jobs_for_all_pending() -> list[dict]:
 def _reset_stale_jobs():
     """将超时的 processing 任务重置为 pending。
 
-    Worker 崩溃或断线后，任务会卡在 processing 状态。
-    在每次 claim_job 前调用，确保超时任务被自动回收。
+    判断依据：worker 心跳超时（last_seen_at 超过 90s）或认领超过 60 分钟（兜底）。
     """
     execute(
         sql.SQL("""
             UPDATE public.xm_jobs
             SET status = 'pending', worker_id = NULL, claimed_at = NULL
             WHERE status = 'processing'
-              AND claimed_at < now() - make_interval(mins => %s)
+              AND (
+                -- worker 心跳超时（主判断）
+                NOT EXISTS (
+                    SELECT 1 FROM public.xm_worker_stats s
+                    WHERE s.worker_id = xm_jobs.worker_id
+                      AND s.last_seen_at > now() - make_interval(secs => %s)
+                )
+                -- 兜底：认领超过 60 分钟无论如何回收
+                OR claimed_at < now() - make_interval(mins => %s)
+              )
         """),
-        (STALE_JOB_TIMEOUT_MINUTES,),
+        (STALE_JOB_HEARTBEAT_SECONDS, STALE_JOB_FALLBACK_MINUTES),
     )
 
 
@@ -112,29 +124,48 @@ def _reset_stale_jobs():
 def claim_job(worker_id: str) -> dict | None:
     """原子认领一个待处理任务。
 
-    使用 FOR UPDATE SKIP LOCKED 确保多个 Worker 不会认领同一任务。
+    优先找回自己之前未完成的 processing 任务（worker 重启场景）。
+    否则用 FOR UPDATE SKIP LOCKED 认领一个新的 pending 任务。
     """
     # 先回收超时任务
     _reset_stale_jobs()
 
-    job = execute_returning(
+    # 优先找回自己 processing 的任务（worker 重启后恢复）
+    job = fetch_one(
         sql.SQL("""
-            UPDATE public.xm_jobs
-            SET status = 'processing', worker_id = %s, claimed_at = now()
-            WHERE job_id IN (
-                SELECT job_id FROM public.xm_jobs
-                WHERE status = 'pending'
-                ORDER BY created_at
-                LIMIT 1
-                FOR UPDATE SKIP LOCKED
-            )
-            RETURNING *
+            SELECT * FROM public.xm_jobs
+            WHERE worker_id = %s AND status = 'processing'
+            ORDER BY claimed_at DESC
+            LIMIT 1
         """),
         (worker_id,),
     )
+    reclaimed = False
+
+    if not job:
+        # 认领新的 pending 任务
+        job = execute_returning(
+            sql.SQL("""
+                UPDATE public.xm_jobs
+                SET status = 'processing', worker_id = %s, claimed_at = now()
+                WHERE job_id IN (
+                    SELECT job_id FROM public.xm_jobs
+                    WHERE status = 'pending'
+                      AND retry_count < %s
+                    ORDER BY created_at
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING *
+            """),
+            (worker_id, MAX_RETRIES),
+        )
 
     if not job:
         return None
+
+    if reclaimed or job.get("worker_id") == worker_id:
+        reclaimed = True
 
     # 获取该专辑的待处理章节列表
     book_id = job["book_id"]
@@ -160,6 +191,7 @@ def claim_job(worker_id: str) -> dict | None:
         )
 
     job["chapters"] = chapters or []
+    job["reclaimed"] = reclaimed
     return job
 
 
@@ -332,6 +364,46 @@ def fail_job(job_id: int, error_message: str) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════
+# Worker 优雅退出释放任务
+# ═══════════════════════════════════════════════════════════
+
+def release_job(worker_id: str) -> dict:
+    """Worker 退出时释放自己 processing 的任务回 pending。
+
+    保留已上传的章节，未完成的章节重置为 pending。
+    """
+    jobs = fetch_all(
+        sql.SQL("""
+            SELECT job_id, book_id FROM public.xm_jobs
+            WHERE worker_id = %s AND status = 'processing'
+        """),
+        (worker_id,),
+    )
+
+    for job in (jobs or []):
+        execute(
+            sql.SQL("""
+                UPDATE public.xm_jobs
+                SET status = 'pending', worker_id = NULL, claimed_at = NULL
+                WHERE job_id = %s
+            """),
+            (job["job_id"],),
+        )
+        execute(
+            sql.SQL("""
+                UPDATE public.audiobook_chapters
+                SET upload_status = 'pending', worker_id = NULL, claimed_at = NULL
+                WHERE book_id = %s AND upload_status NOT IN ('uploaded', 'failed')
+            """),
+            (job["book_id"],),
+        )
+        logger.info(f"任务 #{job['job_id']} 已由 {worker_id} 释放")
+
+    count = len(jobs or [])
+    return {"ok": True, "released": count}
+
+
+# ═══════════════════════════════════════════════════════════
 # 手动重置任务
 # ═══════════════════════════════════════════════════════════
 
@@ -339,19 +411,24 @@ def reset_job(job_id: int) -> dict:
     """手动重置任务为 pending，将未完成的章节重置为 pending。
 
     用于处理卡在 processing 状态的任务（worker 崩溃/断线）。
+    超过最大重试次数的任务不允许重置。
     """
-    job = fetch_one("SELECT book_id FROM public.xm_jobs WHERE job_id = %s", (job_id,))
+    job = fetch_one("SELECT book_id, retry_count FROM public.xm_jobs WHERE job_id = %s", (job_id,))
     if not job:
         return {"ok": False, "error": "任务不存在"}
 
+    if int(job.get("retry_count", 0)) >= MAX_RETRIES:
+        return {"ok": False, "error": f"已超过最大重试次数 ({MAX_RETRIES})，请删除任务后重新创建"}
+
     book_id = job["book_id"]
 
-    # 重置任务状态
+    # 重置任务状态（递增 retry_count）
     execute(
         sql.SQL("""
             UPDATE public.xm_jobs
             SET status = 'pending', worker_id = NULL, claimed_at = NULL,
-                finished_at = NULL, error_message = NULL
+                finished_at = NULL, error_message = NULL,
+                retry_count = retry_count + 1
             WHERE job_id = %s
         """),
         (job_id,),
@@ -362,7 +439,7 @@ def reset_job(job_id: int) -> dict:
         sql.SQL("""
             UPDATE public.audiobook_chapters
             SET upload_status = 'pending'
-            WHERE book_id = %s AND upload_status NOT IN ('uploaded',)
+            WHERE book_id = %s AND upload_status != 'uploaded'
         """),
         (book_id,),
     )

@@ -229,7 +229,7 @@ class ColabWorker:
 
         try:
             # 使用喜马拉雅 API 下载
-            from pipeline.ximalaya_api import download_track
+            from pipeline.ximalaya_api import download_track, parse_quality_priority
 
             cookie = self.config.get("xm_cookie", "")
             headers = {"Cookie": cookie} if cookie else None
@@ -241,7 +241,11 @@ class ColabWorker:
             pool = get_pool()
             proxies = pool.get() if pool else None
 
-            status, file_size = download_track(track_id, audio_path, headers=headers, proxies=proxies)
+            # 音质优先级
+            quality_priority = parse_quality_priority(self.config.get("audio_quality"))
+
+            status, file_size = download_track(track_id, audio_path, headers=headers,
+                                                proxies=proxies, quality_priority=quality_priority)
             if status not in ("downloaded", "skipped"):
                 # 下载失败时标记代理不可用
                 if pool and proxies:
@@ -357,6 +361,15 @@ class ColabWorker:
         logger.error(f"任务 #{job_id} 失败: {error_message}")
         return resp
 
+    def release_job(self):
+        """退出时释放自己 processing 的任务。"""
+        try:
+            resp = self._post("/api/jobs/release", {})
+            if resp.get("ok") and resp.get("released", 0) > 0:
+                logger.info(f"已释放 {resp['released']} 个未完成任务")
+        except Exception as e:
+            logger.warning(f"释放任务失败: {e}")
+
     # ─── 主循环 ───
 
     def run(self, poll_interval: int = 10, max_jobs: int = 0):
@@ -400,7 +413,8 @@ class ColabWorker:
                     jobs_done += 1
                     continue
 
-                logger.info(f"开始处理任务 #{job_id}: {job.get('book_name', '')} ({total} 章节)")
+                logger.info(f"开始处理任务 #{job_id}: {job.get('book_name', '')} ({total} 章节)"
+                           + (" [找回之前未完成的任务]" if job.get("reclaimed") else ""))
 
                 # 刷新配置（确保最新 TG token 等）
                 self.fetch_config()
@@ -432,6 +446,7 @@ class ColabWorker:
             logger.info("用户中断")
         finally:
             self.stop_heartbeat()
+            self.release_job()
             logger.info("Worker 已停止")
 
 

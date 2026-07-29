@@ -14,6 +14,7 @@ from ..services.job_service import (
     heartbeat,
     add_chapter_to_worker,
     reset_job,
+    release_job,
 )
 from ..database import fetch_all, fetch_one
 
@@ -149,6 +150,12 @@ def api_reset_job(job_id: int):
     return reset_job(job_id)
 
 
+@router.post("/jobs/release")
+def api_release_job(worker_id: str = Query(...)):
+    """Worker 退出时释放自己 processing 的任务。"""
+    return release_job(worker_id)
+
+
 # ═══════════════════════════════════════
 # 配置分发
 # ═══════════════════════════════════════
@@ -184,6 +191,7 @@ def api_config(worker_id: str = Query("")):
             "proxy_test_url": settings_map.get("PROXY_TEST_URL", "https://www.ximalaya.com"),
             "proxy_dead_retry_minutes": int(settings_map.get("PROXY_DEAD_RETRY_MINUTES", "5")),
             "proxy_timeout": int(settings_map.get("PROXY_TIMEOUT", "10")),
+            "audio_quality": settings_map.get("XM_AUDIO_QUALITY", "M4A_24"),
         },
     }
 
