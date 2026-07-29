@@ -272,8 +272,9 @@ class ColabWorker:
                         setup_deep_filter()
 
                     seg_min = self.config.get("deepfilter_segment_minutes", 60)
+                    model = self.config.get("deepfilter_model", "DeepFilterNet2")
                     denoised_path = audio_path.replace(".m4a", "_denoised.m4a")
-                    denoised_path = denoise_audio_keep_format(audio_path, denoised_path, seg_min)
+                    denoised_path = denoise_audio_keep_format(audio_path, denoised_path, seg_min, model=model)
 
                     # 用降噪后的文件
                     if os.path.exists(denoised_path) and os.path.getsize(denoised_path) > 0:

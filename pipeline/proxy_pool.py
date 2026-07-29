@@ -118,10 +118,12 @@ class ProxyPool:
         test_url: str = "https://www.ximalaya.com",
         dead_retry_minutes: int = 5,
         timeout: int = 10,
+        on_dead=None,
     ):
         self._test_url = test_url
         self._timeout = timeout
         self._lock = threading.Lock()
+        self._on_dead = on_dead  # 回调: on_dead(proxy_url) 代理被踢出时调用
 
         # 去重
         seen = set()
@@ -178,7 +180,7 @@ class ProxyPool:
             return build_proxies_dict(chosen)
 
     def mark_dead(self, proxy_url: str):
-        """将代理永久踢出代理池。"""
+        """将代理永久踢出代理池，并触发 on_dead 回调。"""
         with self._lock:
             if proxy_url in self._all_proxies:
                 self._all_proxies.remove(proxy_url)
@@ -187,6 +189,52 @@ class ProxyPool:
             self._latency_map.pop(proxy_url, None)
             remaining = len(self._sorted_proxies)
             logger.warning(f"代理踢出: {proxy_url} (剩余 {remaining} 个)")
+
+        # 回调通知外部（如 VPS 端更新 DB 缓存）
+        if self._on_dead:
+            try:
+                self._on_dead(proxy_url)
+            except Exception as e:
+                logger.warning(f"on_dead 回调失败: {e}")
+
+    def add_proxies(self, new_proxies: list[str]) -> int:
+        """合并新代理到池中（去重），只检测新代理，返回新增数量。"""
+        with self._lock:
+            existing = set(self._all_proxies)
+            truly_new = [p.strip() for p in new_proxies if p.strip() and p.strip() not in existing]
+            if not truly_new:
+                return 0
+            self._all_proxies.extend(truly_new)
+            for p in truly_new:
+                self._latency_map[p] = -1.0
+
+        logger.info(f"代理池新增 {len(truly_new)} 个代理 (去重后), 开始检测...")
+
+        # 只检测新代理
+        added = 0
+        for proxy_url in truly_new:
+            latency, ok = self._measure_latency(proxy_url)
+            if ok:
+                with self._lock:
+                    self._latency_map[proxy_url] = latency
+                    if proxy_url not in self._sorted_proxies:
+                        self._sorted_proxies.append(proxy_url)
+                added += 1
+                logger.info(f"[补充检测] 新代理可用: {proxy_url} (延迟 {latency:.2f}s)")
+            else:
+                with self._lock:
+                    self._all_proxies.remove(proxy_url) if proxy_url in self._all_proxies else None
+                    self._latency_map.pop(proxy_url, None)
+
+        # 重新排序
+        with self._lock:
+            self._sorted_proxies = sorted(
+                self._sorted_proxies,
+                key=lambda p: self._latency_map.get(p, 999) if self._latency_map.get(p, -1) > 0 else 999,
+            )
+
+        logger.info(f"代理池补充完成: 新增 {added} 个可用, 总计 {len(self._sorted_proxies)} 个")
+        return added
 
     def health_check(self) -> dict:
         """检测所有代理的连通性和延迟，按延迟重新排序。
@@ -286,10 +334,11 @@ def init_pool(
     test_url: str = "https://www.ximalaya.com",
     dead_retry_minutes: int = 5,
     timeout: int = 10,
+    on_dead=None,
 ) -> ProxyPool:
     """初始化全局代理池。"""
     global _pool
-    _pool = ProxyPool(proxy_list, test_url, dead_retry_minutes, timeout)
+    _pool = ProxyPool(proxy_list, test_url, dead_retry_minutes, timeout, on_dead=on_dead)
     return _pool
 
 

@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════
-# DeepFilter 二进制路径
+# DeepFilter 二进制路径 & 模型选择
 # ═══════════════════════════════════════════════════════════
 
 _DEEPFILTER_DIR = os.environ.get("DEEPFILTER_DIR", "/content/.deepfilter")
@@ -27,6 +27,11 @@ DEEPFILTER_DOWNLOAD_URL = (
     "https://github.com/Rikorose/DeepFilterNet/releases/download/v0.5.6/"
     "deep-filter-0.5.6-x86_64-unknown-linux-musl"
 )
+
+# 可选模型: DeepFilterNet (v1, RTF≈0.19), DeepFilterNet2 (v2, RTF≈0.08, 推荐),
+#            DeepFilterNet3 (v3, 质量最高, RTF≈0.10)
+DEFAULT_MODEL = "DeepFilterNet2"
+VALID_MODELS = {"DeepFilterNet", "DeepFilterNet2", "DeepFilterNet3"}
 
 
 def setup_deep_filter():
@@ -80,13 +85,15 @@ def _split_audio_to_wav(input_file: str, output_dir: str, seg_minutes: int = 60,
         )
 
 
-def _df_process_wav(wav_file: str, output_dir: str) -> str:
+def _df_process_wav(wav_file: str, output_dir: str, model: str = DEFAULT_MODEL) -> str:
     """用 DeepFilter 处理单个 WAV 段。"""
-    subprocess.run([DEEP_FILTER_PATH, wav_file, "--output-dir", output_dir], check=True)
+    cmd = [DEEP_FILTER_PATH, "-m", model, wav_file, "--output-dir", output_dir]
+    subprocess.run(cmd, check=True)
     return os.path.join(output_dir, os.path.basename(wav_file))
 
 
-def _df_and_merge(input_dir: str, output_dir: str, final_output: str, max_workers: int = 1):
+def _df_and_merge(input_dir: str, output_dir: str, final_output: str,
+                  max_workers: int = 1, model: str = DEFAULT_MODEL):
     """处理所有 WAV 段并合并。"""
     from pydub import AudioSegment
 
@@ -104,7 +111,7 @@ def _df_and_merge(input_dir: str, output_dir: str, final_output: str, max_worker
 
     worker_count = max(1, min(max_workers, len(renamed)))
     with ThreadPoolExecutor(max_workers=worker_count) as ex:
-        processed = list(ex.map(lambda f: _df_process_wav(f, output_dir), renamed))
+        processed = list(ex.map(lambda f: _df_process_wav(f, output_dir, model), renamed))
 
     processed.sort(key=lambda x: int(os.path.splitext(os.path.basename(x))[0]))
     combined = AudioSegment.empty()
@@ -118,8 +125,10 @@ def _df_and_merge(input_dir: str, output_dir: str, final_output: str, max_worker
 # 公开接口
 # ═══════════════════════════════════════════════════════════
 
-def denoise_audio(audio_path: str, segment_minutes: int = 60) -> tuple[str, str]:
+def denoise_audio(audio_path: str, segment_minutes: int = 60,
+                   model: str = DEFAULT_MODEL) -> tuple[str, str]:
     """降噪单个音频文件，返回 (denoised_wav_path, job_dir)。"""
+    model = model if model in VALID_MODELS else DEFAULT_MODEL
     source = Path(audio_path)
     job_dir = Path(tempfile.mkdtemp(prefix="deepfilter_job_"))
     split_dir = job_dir / "segments"
@@ -127,15 +136,17 @@ def denoise_audio(audio_path: str, segment_minutes: int = 60) -> tuple[str, str]
     safe_stem = re.sub(r'[^\w\-]', '_', source.stem) if source.stem else "audio"
     denoised = job_dir / f"denoised_{safe_stem}.wav"
 
-    logger.info(f"开始降噪: {source.name}")
+    logger.info(f"开始降噪 (模型={model}): {source.name}")
     _split_audio_to_wav(audio_path, str(split_dir), segment_minutes)
-    _df_and_merge(str(split_dir), str(df_dir), str(denoised), max_workers=1)
+    _df_and_merge(str(split_dir), str(df_dir), str(denoised),
+                  max_workers=1, model=model)
     logger.info(f"降噪完成: {source.name}")
     return str(denoised), str(job_dir)
 
 
 def denoise_audio_keep_format(audio_path: str, output_path: str = "",
-                              segment_minutes: int = 60) -> str:
+                              segment_minutes: int = 60,
+                              model: str = DEFAULT_MODEL) -> str:
     """降噪并保持原始音频格式，返回输出路径。"""
     if not os.path.exists(DEEP_FILTER_PATH):
         if not setup_deep_filter():
@@ -150,7 +161,7 @@ def denoise_audio_keep_format(audio_path: str, output_path: str = "",
         logger.info(f"复用已降噪音频: {target.name}")
         return str(target)
 
-    temp_wav, job_dir = denoise_audio(audio_path, segment_minutes)
+    temp_wav, job_dir = denoise_audio(audio_path, segment_minutes, model=model)
     os.makedirs(target.parent, exist_ok=True)
 
     try:

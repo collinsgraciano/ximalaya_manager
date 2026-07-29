@@ -72,8 +72,8 @@
 const SETTING_GROUPS = {
     'Telegram': ['TG_BOT_TOKEN', 'TG_CHAT_ID', 'TG_SERIAL_UPLOAD', 'TG_UPLOAD_INTERVAL'],
     '喜马拉雅': ['XM_COOKIE', 'DOWNLOAD_INTERVAL', 'XM_AUDIO_QUALITY'],
-    '代理': ['PROXY_ENABLED', 'PROXY_LIST', 'PROXY_LIST_URL', 'PROXY_VERIFY_COUNTRY', 'PROXY_MAX_TESTS', 'PROXY_REFRESH_HOURS', 'PROXY_TEST_URL', 'PROXY_DEAD_RETRY_MINUTES', 'PROXY_TIMEOUT'],
-    'DeepFilter': ['ENABLE_DEEPFILTER', 'DEEPFILTER_SEGMENT_MINUTES'],
+    '代理': ['PROXY_ENABLED', 'PROXY_LIST', 'PROXY_LIST_URL', 'PROXY_VERIFY_COUNTRY', 'PROXY_MAX_TESTS', 'PROXY_REFRESH_HOURS', 'PROXY_TEST_URL', 'PROXY_TIMEOUT'],
+    'DeepFilter': ['ENABLE_DEEPFILTER', 'DEEPFILTER_MODEL', 'DEEPFILTER_SEGMENT_MINUTES'],
 };
 
 async function loadSettings() {
@@ -145,6 +145,28 @@ function renderSettingGroup(name, items) {
             </div>`;
         }
 
+        // DEEPFILTER_MODEL 渲染为下拉选择
+        if (s.setting_key === 'DEEPFILTER_MODEL') {
+            const models = [
+                {value: 'DeepFilterNet', label: 'DeepFilterNet (v1, 较慢, RTF≈0.19)'},
+                {value: 'DeepFilterNet2', label: 'DeepFilterNet2 (v2, 推荐, RTF≈0.08)'},
+                {value: 'DeepFilterNet3', label: 'DeepFilterNet3 (v3, 质量最高, RTF≈0.10)'},
+            ];
+            const options = models.map(m => {
+                const selected = val === m.value ? 'selected' : '';
+                return `<option value="${m.value}" ${selected}>${m.label}</option>`;
+            }).join('');
+            return `<div class="mb-2">
+                <label class="form-label small mb-1">
+                    ${s.setting_key}
+                    ${s.description ? `<span class="text-muted"> — ${s.description}</span>` : ''}
+                </label>
+                <select class="form-select form-select-sm" data-key="${s.setting_key}">
+                    ${options}
+                </select>
+            </div>`;
+        }
+
         return `<div class="mb-2">
             <label class="form-label small mb-1">
                 ${s.setting_key}
@@ -187,7 +209,7 @@ function togglePassword(btn) {
 }
 
 async function saveSettings() {
-    const inputs = document.querySelectorAll('#settings-fields input[data-key], #settings-fields textarea[data-key]');
+    const inputs = document.querySelectorAll('#settings-fields input[data-key], #settings-fields textarea[data-key], #settings-fields select[data-key]');
     let saved = 0;
     let errors = 0;
     for (const input of inputs) {
@@ -241,6 +263,7 @@ async function previewConfig() {
             ['tg_chat_id', cfg.tg_chat_id || '(空)'],
             ['xm_cookie', cfg.xm_cookie ? '已配置 (' + cfg.xm_cookie.length + ' 字符)' : '(空)'],
             ['enable_deepfilter', cfg.enable_deepfilter],
+            ['deepfilter_model', cfg.deepfilter_model || 'DeepFilterNet2'],
             ['deepfilter_segment_minutes', cfg.deepfilter_segment_minutes],
             ['download_interval', cfg.download_interval],
             ['tg_serial_upload', cfg.tg_serial_upload],
@@ -252,7 +275,6 @@ async function previewConfig() {
             ['proxy_max_tests', cfg.proxy_max_tests],
             ['proxy_refresh_hours', cfg.proxy_refresh_hours + ' 小时'],
             ['proxy_test_url', cfg.proxy_test_url || 'https://www.ximalaya.com'],
-            ['proxy_dead_retry_minutes', cfg.proxy_dead_retry_minutes],
             ['proxy_timeout', cfg.proxy_timeout],
             ['audio_quality', cfg.audio_quality || 'M4A_24'],
         ];

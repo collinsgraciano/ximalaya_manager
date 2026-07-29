@@ -26,6 +26,117 @@ logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════
+# 代理池后台刷新线程
+# ═══════════════════════════════════════════════════════════
+
+_proxy_refresh_thread: threading.Thread | None = None
+_proxy_refresh_stop = threading.Event()
+
+
+def _proxy_refresh_loop():
+    """后台线程：每隔 PROXY_REFRESH_HOURS 小时自动发现新代理并合并到池中。"""
+    while not _proxy_refresh_stop.is_set():
+        # 读取刷新间隔（每次从 DB 读，支持运行时修改）
+        try:
+            refresh_hours = float(fetch_val(
+                "SELECT setting_value FROM public.global_settings WHERE setting_key = 'PROXY_REFRESH_HOURS'",
+                (),
+            ) or "2")
+        except Exception:
+            refresh_hours = 2.0
+        if refresh_hours <= 0:
+            refresh_hours = 2.0
+
+        wait_sec = refresh_hours * 3600
+        logger.info(f"[代理刷新] 下次刷新: {refresh_hours:.1f} 小时后")
+
+        # 等待（每分钟检查一次 stop 信号）
+        for _ in range(int(wait_sec // 60)):
+            if _proxy_refresh_stop.wait(timeout=60):
+                return
+
+        # 执行刷新
+        try:
+            _do_proxy_refresh()
+        except Exception as e:
+            logger.error(f"[代理刷新] 刷新失败: {e}")
+
+
+def _do_proxy_refresh():
+    """执行一次代理刷新：从 URL 获取新代理，去重合并到池 + DB 缓存。"""
+    pool = get_pool()
+    if pool is None:
+        return
+
+    rows = fetch_all(
+        "SELECT setting_key, setting_value FROM public.global_settings "
+        "WHERE setting_key IN ('PROXY_LIST_URL', 'PROXY_VERIFY_COUNTRY', 'PROXY_MAX_TESTS', "
+        "'PROXY_TIMEOUT', 'PROXY_VERIFIED_CACHE')"
+    )
+    settings_map = {row["setting_key"]: row["setting_value"] for row in (rows or [])}
+
+    list_url = settings_map.get("PROXY_LIST_URL", "")
+    if not list_url:
+        logger.warning("[代理刷新] 未配置 PROXY_LIST_URL，跳过")
+        return
+
+    verify_country = settings_map.get("PROXY_VERIFY_COUNTRY", "中国")
+    max_tests = int(settings_map.get("PROXY_MAX_TESTS", "100"))
+    timeout = int(settings_map.get("PROXY_TIMEOUT", "10"))
+
+    logger.info(f"[代理刷新] 从 URL 获取新鲜代理: {list_url}")
+    fresh = auto_discover_proxies(
+        list_url=list_url,
+        verify_country=verify_country,
+        max_tests=max_tests,
+        timeout=min(timeout, 5),
+    )
+    if not fresh:
+        logger.warning("[代理刷新] 未发现新代理")
+        return
+
+    # 合并到内存池（去重 + 只检测新代理）
+    added = pool.add_proxies(fresh)
+    if added == 0:
+        logger.info("[代理刷新] 无新代理需要添加（全部已存在）")
+        return
+
+    # 合并到 DB 缓存（去重）
+    try:
+        cache_raw = fetch_val(
+            "SELECT setting_value FROM public.global_settings WHERE setting_key = 'PROXY_VERIFIED_CACHE'",
+            (),
+        )
+        existing = []
+        if cache_raw:
+            existing = json.loads(cache_raw).get("proxies", [])
+
+        merged = list(dict.fromkeys(existing + list(pool._sorted_proxies)))
+        _persist_alive_proxies(merged)
+        logger.info(f"[代理刷新] DB 缓存已更新: {len(existing)} → {len(merged)} 个代理")
+    except Exception as e:
+        logger.warning(f"[代理刷新] 更新 DB 缓存失败: {e}")
+
+
+def _start_proxy_refresh_thread():
+    """启动后台代理刷新线程（如果尚未启动）。"""
+    global _proxy_refresh_thread
+    if _proxy_refresh_thread is not None and _proxy_refresh_thread.is_alive():
+        return
+    _proxy_refresh_stop.clear()
+    _proxy_refresh_thread = threading.Thread(target=_proxy_refresh_loop, daemon=True, name="proxy-refresh")
+    _proxy_refresh_thread.start()
+    logger.info("[代理刷新] 后台线程已启动")
+
+
+def _stop_proxy_refresh_thread():
+    """停止后台代理刷新线程。"""
+    _proxy_refresh_stop.set()
+    if _proxy_refresh_thread:
+        _proxy_refresh_thread.join(timeout=5)
+
+
+# ═══════════════════════════════════════════════════════════
 # 采集进度状态（线程安全）
 # ═══════════════════════════════════════════════════════════
 
@@ -82,16 +193,44 @@ def _build_headers(cookie: str = "") -> dict:
     return headers
 
 
+def _persist_alive_proxies(alive_list: list[str]):
+    """把存活代理列表回写 DB 缓存。"""
+    cache_json = json.dumps({"proxies": alive_list, "verified_at": datetime.now().isoformat()})
+    execute(
+        sql.SQL("UPDATE public.global_settings SET setting_value = %s WHERE setting_key = 'PROXY_VERIFIED_CACHE'"),
+        (cache_json,),
+    )
+
+
+def _on_proxy_dead(proxy_url: str):
+    """代理被踢出时的回调：从 DB 缓存中同步删除。"""
+    try:
+        cache_raw = fetch_val(
+            "SELECT setting_value FROM public.global_settings WHERE setting_key = 'PROXY_VERIFIED_CACHE'",
+            (),
+        )
+        if not cache_raw:
+            return
+        cache = json.loads(cache_raw)
+        proxies = cache.get("proxies", [])
+        if proxy_url in proxies:
+            proxies.remove(proxy_url)
+            _persist_alive_proxies(proxies)
+            logger.info(f"已从缓存删除失效代理: {proxy_url} (缓存剩余 {len(proxies)} 个)")
+    except Exception as e:
+        logger.warning(f"从缓存删除失效代理失败: {e}")
+
+
 def _init_proxy_pool():
     """从全局设置读取代理配置并初始化代理池。
 
     代理列表优先级：
     1. PROXY_LIST 手动填写 → 直接使用，不缓存
-    2. PROXY_VERIFIED_CACHE 缓存 → 未过期则复用
-    3. 从 PROXY_LIST_URL 自动发现 → 检测后存入缓存
+    2. PROXY_VERIFIED_CACHE 缓存 → 永久复用，直到代理失效才删除
+    3. 缓存为空 → 从 PROXY_LIST_URL 自动发现 → 存入缓存
 
-    缓存过期或全部代理失效时自动重新发现。
     代理池只初始化一次，后续调用直接复用。
+    代理失效时（health_check 或运行时 mark_dead）实时从缓存删除。
 
     返回 (proxy_enabled, proxy_proxies_dict)。
     如果代理未启用或未配置，返回 (False, {})。
@@ -104,7 +243,7 @@ def _init_proxy_pool():
     rows = fetch_all(
         "SELECT setting_key, setting_value FROM public.global_settings "
         "WHERE setting_key IN ('PROXY_ENABLED', 'PROXY_LIST', 'PROXY_LIST_URL', "
-        "'PROXY_VERIFY_COUNTRY', 'PROXY_MAX_TESTS', 'PROXY_REFRESH_HOURS', "
+        "'PROXY_VERIFY_COUNTRY', 'PROXY_MAX_TESTS', "
         "'PROXY_VERIFIED_CACHE', 'PROXY_TEST_URL', "
         "'PROXY_DEAD_RETRY_MINUTES', 'PROXY_TIMEOUT')"
     )
@@ -124,37 +263,39 @@ def _init_proxy_pool():
     # 模式1: 手动列表有值 → 直接用（不缓存）
     if proxy_list:
         init_pool(proxy_list=proxy_list, test_url=test_url,
-                  dead_retry_minutes=dead_retry_minutes, timeout=timeout)
+                  dead_retry_minutes=dead_retry_minutes, timeout=timeout,
+                  on_dead=_on_proxy_dead)
         pool = get_pool()
         if pool:
             stats = pool.health_check()
             logger.info(f"代理池健康检测(手动列表): {stats['alive']}/{stats['total']} 可用")
         return True, get_proxy()
 
+    # 启动后台代理刷新线程
+    _start_proxy_refresh_thread()
+
     # 模式2/3: 手动列表为空 → 读缓存或自动发现
-    refresh_hours = float(settings_map.get("PROXY_REFRESH_HOURS", "6"))
     cached_proxies = None
 
     cache_raw = settings_map.get("PROXY_VERIFIED_CACHE", "")
     if cache_raw:
         try:
             cache = json.loads(cache_raw)
-            verified_at = datetime.fromisoformat(cache["verified_at"])
-            age_hours = (datetime.now() - verified_at).total_seconds() / 3600
-            if age_hours < refresh_hours and cache.get("proxies"):
+            if cache.get("proxies"):
                 cached_proxies = cache["proxies"]
-                logger.info(f"复用缓存代理: {len(cached_proxies)} 个 (验证于 {age_hours:.1f} 小时前, 刷新间隔 {refresh_hours}h)")
+                logger.info(f"复用缓存代理: {len(cached_proxies)} 个 (永久缓存，失效即删)")
         except Exception as e:
             logger.warning(f"解析代理缓存失败: {e}")
 
-    # 缓存不存在或已过期 → 自动发现
+    # 缓存为空 → 自动发现
     if not cached_proxies:
-        cached_proxies = _auto_discover_and_cache(settings_map, timeout, refresh_hours)
+        cached_proxies = _auto_discover_and_cache(settings_map, timeout)
         if not cached_proxies:
             return False, {}
 
     init_pool(proxy_list=cached_proxies, test_url=test_url,
-              dead_retry_minutes=dead_retry_minutes, timeout=timeout)
+              dead_retry_minutes=dead_retry_minutes, timeout=timeout,
+              on_dead=_on_proxy_dead)
 
     # 健康检测（仅一次）
     pool = get_pool()
@@ -163,15 +304,9 @@ def _init_proxy_pool():
         logger.info(f"代理池健康检测: {stats['alive']}/{stats['total']} 可用")
 
         # health_check 后把存活的代理回写缓存，踢除已失效的
-        if stats["dead"] > 0:
-            alive_proxies = [p for p in pool._sorted_proxies]
-            if alive_proxies:
-                cache_json = json.dumps({"proxies": alive_proxies, "verified_at": datetime.now().isoformat()})
-                execute(
-                    sql.SQL("UPDATE public.global_settings SET setting_value = %s WHERE setting_key = 'PROXY_VERIFIED_CACHE'"),
-                    (cache_json,),
-                )
-                logger.info(f"已更新缓存: 踢除 {stats['dead']} 个失效代理, 保留 {len(alive_proxies)} 个")
+        if stats["dead"] > 0 and pool._sorted_proxies:
+            _persist_alive_proxies(list(pool._sorted_proxies))
+            logger.info(f"已更新缓存: 踢除 {stats['dead']} 个失效代理, 保留 {len(pool._sorted_proxies)} 个")
 
         # 全部失效 → 清缓存重新发现
         if stats["alive"] == 0 and stats["total"] > 0:
@@ -180,29 +315,28 @@ def _init_proxy_pool():
                 sql.SQL("UPDATE public.global_settings SET setting_value = '' WHERE setting_key = 'PROXY_VERIFIED_CACHE'"),
                 (),
             )
-            new_proxies = _auto_discover_and_cache(settings_map, timeout, refresh_hours)
+            new_proxies = _auto_discover_and_cache(settings_map, timeout)
             if new_proxies:
                 init_pool(proxy_list=new_proxies, test_url=test_url,
-                          dead_retry_minutes=dead_retry_minutes, timeout=timeout)
+                          dead_retry_minutes=dead_retry_minutes, timeout=timeout,
+                          on_dead=_on_proxy_dead)
                 pool = get_pool()
                 if pool:
                     stats = pool.health_check()
                     logger.info(f"重新发现后健康检测: {stats['alive']}/{stats['total']} 可用")
-                    # 回写缓存（仅存活的）
                     if pool._sorted_proxies:
-                        cache_json = json.dumps({"proxies": list(pool._sorted_proxies), "verified_at": datetime.now().isoformat()})
-                        execute(
-                            sql.SQL("UPDATE public.global_settings SET setting_value = %s WHERE setting_key = 'PROXY_VERIFIED_CACHE'"),
-                            (cache_json,),
-                        )
+                        _persist_alive_proxies(list(pool._sorted_proxies))
             else:
                 logger.warning("重新发现代理失败，使用直连")
                 return False, {}
 
+    # 启动后台代理刷新线程（定时自动发现新代理合并到池）
+    _start_proxy_refresh_thread()
+
     return True, get_proxy()
 
 
-def _auto_discover_and_cache(settings_map: dict, timeout: int, refresh_hours: float) -> list[str]:
+def _auto_discover_and_cache(settings_map: dict, timeout: int) -> list[str]:
     """从 URL 自动发现中国代理，结果存入数据库缓存。"""
     list_url = settings_map.get("PROXY_LIST_URL", "")
     if not list_url:
@@ -229,7 +363,7 @@ def _auto_discover_and_cache(settings_map: dict, timeout: int, refresh_hours: fl
         sql.SQL("UPDATE public.global_settings SET setting_value = %s WHERE setting_key = 'PROXY_VERIFIED_CACHE'"),
         (cache_json,),
     )
-    logger.info(f"已验证代理已缓存: {len(proxies)} 个 (刷新间隔 {refresh_hours}h)")
+    logger.info(f"已验证代理已缓存: {len(proxies)} 个 (永久保存，失效即删)")
     return proxies
 
 
