@@ -318,8 +318,7 @@ def scrape_category(category: str, max_pages: int = 0, sort: str = "default",
                     proxies: dict | None = None,
                     on_page_done=None,
                     should_stop=None,
-                    shared_seen_ids: set | None = None,
-                    scrape_subcategories: bool = False) -> list[dict]:
+                    shared_seen_ids: set | None = None) -> list[dict]:
     """采集分类下的所有专辑，返回标准化专辑列表。
 
     Args:
@@ -327,7 +326,6 @@ def scrape_category(category: str, max_pages: int = 0, sort: str = "default",
         on_page_done: 回调 fn(page, new_albums, total_so_far, sub_info=None)
         should_stop: 回调 fn() -> bool — 返回 True 时停止采集（手动停止）。
         shared_seen_ids: 跨分类共享的去重集合。
-        scrape_subcategories: 是否自动展开子分类树逐个叶子采集（绕过 3000 上限）。
     """
     sort_val = SORT_MAP.get(sort, 0)
 
@@ -349,41 +347,12 @@ def scrape_category(category: str, max_pages: int = 0, sort: str = "default",
     all_albums: list[dict] = []
     seen_ids: set = shared_seen_ids if shared_seen_ids is not None else set()
 
-    # 确定采集目标列表: [(target_id, sub_info), ...]
-    targets: list[tuple[int, dict | None]] = []
-
-    if scrape_subcategories:
-        subcats = fetch_subcategories(category_id, headers, proxies)
-        if subcats:
-            for b_id, group in subcats.items():
-                for sub in group["subs"]:
-                    sub_info = {
-                        "b_id": b_id,
-                        "c_id": sub["id"],
-                        "b_name": group["name"],
-                        "c_name": sub["name"],
-                        "name": f"{group['name']}/{sub['name']}",
-                    }
-                    targets.append((sub["id"], sub_info))
-            logger.info(f"  分类 {category}(ID={category_id}): 展开为 {len(targets)} 个子分类")
-        else:
-            targets.append((category_id, None))
-    else:
-        targets.append((category_id, None))
-
     # 逐个目标采集
-    for target_id, sub_info in targets:
-        if should_stop and should_stop():
-            logger.info("  用户手动停止采集")
-            break
-        if max_albums > 0 and len(all_albums) >= max_albums:
-            break
-
-        _scrape_target(
-            target_id, sort_val, max_pages, max_albums, free_only,
-            headers, proxies, all_albums, seen_ids,
-            on_page_done, should_stop, sub_info,
-        )
+    _scrape_target(
+        category_id, sort_val, max_pages, max_albums, free_only,
+        headers, proxies, all_albums, seen_ids,
+        on_page_done, should_stop, None,
+    )
 
     return all_albums
 

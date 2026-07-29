@@ -15,6 +15,10 @@ from ..services.job_service import (
     add_chapter_to_worker,
     reset_job,
     release_job,
+    delete_job,
+    delete_jobs_batch,
+    reset_jobs_batch,
+    delete_jobs_by_status,
 )
 from ..database import fetch_all, fetch_one
 
@@ -63,7 +67,7 @@ def api_claim_job(worker_id: str = Query(...)):
 
 class ChapterResult(BaseModel):
     chapter_id: str
-    upload_status: str  # uploaded / failed
+    upload_status: str  # uploaded / pending
     telegram_file_id: str = ""
     telegram_message_id: int = 0
     telegram_bot_id: int | None = None
@@ -157,6 +161,34 @@ def api_fail_job(job_id: int, req: JobFail,
 def api_reset_job(job_id: int):
     """手动重置任务为 pending（Web UI 用，无需 worker_id 验证）。"""
     return reset_job(job_id)
+
+
+@router.delete("/jobs/{job_id}")
+def api_delete_job(job_id: int):
+    """删除任务（Web UI 用，不删除专辑和已上传章节）。"""
+    return delete_job(job_id)
+
+
+class BatchJobIds(BaseModel):
+    job_ids: list[int]
+
+
+@router.post("/jobs/batch-delete")
+def api_batch_delete_jobs(req: BatchJobIds):
+    """批量删除任务。"""
+    return delete_jobs_batch(req.job_ids)
+
+
+@router.post("/jobs/batch-reset")
+def api_batch_reset_jobs(req: BatchJobIds):
+    """批量重置任务为 pending。"""
+    return reset_jobs_batch(req.job_ids)
+
+
+@router.delete("/jobs/status/{status}")
+def api_delete_jobs_by_status(status: str):
+    """按状态删除所有匹配的任务。"""
+    return delete_jobs_by_status(status)
 
 
 @router.post("/jobs/release")

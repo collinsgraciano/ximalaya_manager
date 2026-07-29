@@ -20,7 +20,6 @@ from ..services.scrape_service import (
     get_tracks_status,
     stop_tracks_scrape,
     get_categories,
-    get_subcategories,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,13 +33,6 @@ router = APIRouter(prefix="/api", tags=["albums"])
 @router.get("/categories")
 def api_categories():
     return {"categories": get_categories()}
-
-
-@router.get("/categories/{category}/subcategories")
-def api_subcategories(category: str):
-    """获取指定分类的子分类树。"""
-    subs = get_subcategories(category)
-    return {"category": category, "subcategories": subs}
 
 
 # ═══════════════════════════════════════
@@ -94,7 +86,6 @@ class ScrapeRequest(BaseModel):
     sort: str = "default"
     free_only: bool = False
     max_albums: int = 0
-    scrape_subcategories: bool = False
 
 
 @router.post("/albums/scrape")
@@ -102,7 +93,7 @@ def api_scrape(req: ScrapeRequest):
     if not req.categories:
         return {"ok": False, "error": "请至少选择一个分类"}
     ok = start_scrape(req.categories, req.max_pages, req.sort, req.free_only,
-                      req.max_albums, req.scrape_subcategories)
+                      req.max_albums)
     if not ok:
         return {"ok": False, "error": "已有采集任务正在运行"}
     return {"ok": True, "message": "采集已启动"}
@@ -255,46 +246,6 @@ def api_reset_chapters(book_id: str):
 # ═══════════════════════════════════════
 # 删除所有专辑
 # ═══════════════════════════════════════
-
-# ═══════════════════════════════════════
-# 一键修复封面图 CDN 地址
-# ═══════════════════════════════════════
-
-@router.post("/albums/fix-covers")
-def api_fix_covers():
-    """将 book_data.albumCover 中旧的 imagev2.ximalaya.com 域名替换为 fdfs.xmcdn.com。"""
-    from ..database import execute as db_execute, fetch_val
-
-    affected = fetch_val(
-        "SELECT count(*) FROM public.books WHERE book_data->>'albumCover' LIKE '%%imagev2.ximalaya.com%%'"
-    )
-    if not affected:
-        return {"ok": True, "fixed": 0, "message": "没有需要修复的封面"}
-
-    db_execute(
-        """
-        UPDATE public.books
-        SET book_data = jsonb_set(
-                book_data,
-                '{albumCover}',
-                to_jsonb(
-                    REPLACE(
-                        REPLACE(
-                            book_data->>'albumCover',
-                            'imagev2.ximalaya.com/100/',
-                            'fdfs.xmcdn.com/group10/'
-                        ),
-                        'imagev2.ximalaya.com',
-                        'fdfs.xmcdn.com'
-                    )
-                )
-            ),
-            updated_at = now()
-        WHERE book_data->>'albumCover' LIKE '%%imagev2.ximalaya.com%%'
-        """
-    )
-    return {"ok": True, "fixed": affected}
-
 
 @router.delete("/albums/all")
 def api_delete_all_albums():

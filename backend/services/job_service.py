@@ -14,8 +14,6 @@ logger = logging.getLogger(__name__)
 STALE_JOB_HEARTBEAT_SECONDS = 90
 # 兜底：认领超过此分钟数无论如何回收（防止 worker_stats 表丢失记录）
 STALE_JOB_FALLBACK_MINUTES = 60
-# 最大重试次数
-MAX_RETRIES = 3
 
 
 # ═══════════════════════════════════════════════════════════
@@ -62,14 +60,25 @@ def create_jobs_batch(book_ids: list[str]) -> list[dict]:
 
 
 def create_jobs_for_all_pending() -> list[dict]:
-    """为所有有待处理章节且没有 pending/processing 任务的专辑创建任务。"""
-    # 找出有 pending 章节但没有 pending/processing 任务的专辑
+    """为未完成、不在任务队列且已获取章节的专辑创建任务。"""
+    # 筛选条件：
+    # 1. book_status != 'success'（未完成）
+    # 2. 已有章节记录（已获取章节信息）
+    # 3. 有 pending 章节
+    # 4. 没有 pending/processing 任务（不在任务队列）
     rows = fetch_all(
         sql.SQL("""
             SELECT DISTINCT b.book_id
             FROM public.books b
-            INNER JOIN public.audiobook_chapters c ON c.book_id = b.book_id
-            WHERE c.upload_status = 'pending'
+            WHERE b.book_status != 'success'
+              AND EXISTS (
+                  SELECT 1 FROM public.audiobook_chapters c
+                  WHERE c.book_id = b.book_id
+              )
+              AND EXISTS (
+                  SELECT 1 FROM public.audiobook_chapters c
+                  WHERE c.book_id = b.book_id AND c.upload_status = 'pending'
+              )
               AND NOT EXISTS (
                   SELECT 1 FROM public.xm_jobs j
                   WHERE j.book_id = b.book_id
@@ -143,7 +152,7 @@ def claim_job(worker_id: str) -> dict | None:
     reclaimed = False
 
     if not job:
-        # 认领新的 pending 任务
+        # 认领新的 pending 任务（无重试次数限制）
         job = execute_returning(
             sql.SQL("""
                 UPDATE public.xm_jobs
@@ -151,14 +160,13 @@ def claim_job(worker_id: str) -> dict | None:
                 WHERE job_id IN (
                     SELECT job_id FROM public.xm_jobs
                     WHERE status = 'pending'
-                      AND retry_count < %s
                     ORDER BY created_at
                     LIMIT 1
                     FOR UPDATE SKIP LOCKED
                 )
                 RETURNING *
             """),
-            (worker_id, MAX_RETRIES),
+            (worker_id,),
         )
 
     if not job:
@@ -246,6 +254,10 @@ def update_chapter_result(
     if upload_status == "uploaded":
         from datetime import datetime
         update_data["uploaded_at"] = datetime.now().isoformat()
+    else:
+        # 失败回退为 pending：清除 worker 归属，使下次可被重新认领
+        update_data["worker_id"] = None
+        update_data["claimed_at"] = None
 
     set_parts = sql.SQL(", ").join(
         sql.SQL("{} = {}").format(sql.Identifier(k), sql.Placeholder())
@@ -256,14 +268,14 @@ def update_chapter_result(
         tuple(list(update_data.values()) + [book_id, str(chapter_id)]),
     )
 
-    # 更新 job 的 done_chapters 计数
-    if upload_status in ("uploaded", "failed"):
+    # 更新 job 的 done_chapters 计数（仅统计已上传的）
+    if upload_status == "uploaded":
         execute(
             sql.SQL("""
                 UPDATE public.xm_jobs
                 SET done_chapters = (
                     SELECT COUNT(*) FROM public.audiobook_chapters
-                    WHERE book_id = %s AND upload_status IN ('uploaded', 'failed')
+                    WHERE book_id = %s AND upload_status = 'uploaded'
                 )
                 WHERE job_id = %s
             """),
@@ -290,13 +302,54 @@ def update_chapter_result(
 # ═══════════════════════════════════════════════════════════
 
 def complete_job(job_id: int, result: dict | None = None) -> dict:
-    """标记任务完成。"""
-    # 获取 job 信息
-    job = fetch_one("SELECT book_id FROM public.xm_jobs WHERE job_id = %s", (job_id,))
+    """标记任务完成。
+
+    - 全部章节已上传 → status='done', book_status='success'
+    - 仍有 pending → 重新入队 (status='pending', retry_count++)，无限重试直到全部完成
+    """
+    job = fetch_one("SELECT book_id, retry_count FROM public.xm_jobs WHERE job_id = %s", (job_id,))
     if not job:
         return {"ok": False, "error": "任务不存在"}
 
-    # 更新 job 状态
+    book_id = job["book_id"]
+    retry_count = int(job.get("retry_count", 0))
+
+    # 检查是否还有 pending 章节
+    remaining = fetch_val(
+        "SELECT COUNT(*) FROM public.audiobook_chapters WHERE book_id = %s AND upload_status = 'pending'",
+        (book_id,),
+    )
+    remaining = int(remaining or 0)
+
+    if remaining > 0:
+        # 重新入队，无限重试直到全部完成
+        execute(
+            sql.SQL("""
+                UPDATE public.xm_jobs
+                SET status = 'pending', worker_id = NULL, claimed_at = NULL,
+                    retry_count = retry_count + 1, result = %s
+                WHERE job_id = %s
+            """),
+            (Jsonb(result) if result else None, job_id),
+        )
+        # 释放 pending 章节的 worker 归属
+        execute(
+            sql.SQL("""
+                UPDATE public.audiobook_chapters
+                SET worker_id = NULL, claimed_at = NULL
+                WHERE book_id = %s AND upload_status = 'pending'
+            """),
+            (book_id,),
+        )
+        execute(
+            sql.SQL("UPDATE public.books SET book_status = 'pending', updated_at = now() WHERE book_id = %s"),
+            (book_id,),
+        )
+        logger.info(f"任务 #{job_id} 还有 {remaining} 个 pending 章节，重新入队 (retry={retry_count + 1})")
+        return {"ok": True, "job_id": job_id, "requeued": True, "remaining": remaining,
+                "retry_count": retry_count + 1}
+
+    # 全部完成 → 标记 done, success
     execute(
         sql.SQL("""
             UPDATE public.xm_jobs
@@ -305,38 +358,18 @@ def complete_job(job_id: int, result: dict | None = None) -> dict:
         """),
         (Jsonb(result) if result else None, job_id),
     )
-
-    # 根据实际章节状态判断 book_status
-    book_id = job["book_id"]
-    remaining = fetch_val(
-        "SELECT COUNT(*) FROM public.audiobook_chapters WHERE book_id = %s AND upload_status = 'pending'",
-        (book_id,),
-    )
-    failed_count = fetch_val(
-        "SELECT COUNT(*) FROM public.audiobook_chapters WHERE book_id = %s AND upload_status = 'failed'",
-        (book_id,),
-    )
-    remaining = int(remaining or 0)
-    failed_count = int(failed_count or 0)
-
-    if remaining == 0 and failed_count == 0:
-        book_status = 'success'
-    elif remaining == 0:
-        book_status = 'partial'
-    else:
-        book_status = 'pending'
-
     execute(
-        sql.SQL("UPDATE public.books SET book_status = %s, updated_at = now() WHERE book_id = %s"),
-        (book_status, book_id),
+        sql.SQL("UPDATE public.books SET book_status = 'success', updated_at = now() WHERE book_id = %s"),
+        (book_id,),
     )
 
     # 更新 Worker 统计
-    job_row = fetch_one("SELECT worker_id, claimed_at FROM public.xm_jobs WHERE job_id = %s", (job_id,))
+    job_row = fetch_one("SELECT worker_id FROM public.xm_jobs WHERE job_id = %s", (job_id,))
     if job_row and job_row.get("worker_id"):
         _update_worker_stats(job_row["worker_id"], success=True, chapters=0)
 
-    return {"ok": True, "job_id": job_id}
+    return {"ok": True, "job_id": job_id, "requeued": False,
+            "book_status": "success", "remaining": 0}
 
 
 def fail_job(job_id: int, error_message: str) -> dict:
@@ -363,7 +396,7 @@ def fail_job(job_id: int, error_message: str) -> dict:
             sql.SQL("""
                 UPDATE public.audiobook_chapters
                 SET upload_status = 'pending', worker_id = NULL, claimed_at = NULL
-                WHERE book_id = %s AND upload_status NOT IN ('uploaded', 'failed')
+                WHERE book_id = %s AND upload_status != 'uploaded'
             """),
             (job["book_id"],),
         )
@@ -406,7 +439,7 @@ def release_job(worker_id: str) -> dict:
             sql.SQL("""
                 UPDATE public.audiobook_chapters
                 SET upload_status = 'pending', worker_id = NULL, claimed_at = NULL
-                WHERE book_id = %s AND upload_status NOT IN ('uploaded', 'failed')
+                WHERE book_id = %s AND upload_status != 'uploaded'
             """),
             (job["book_id"],),
         )
@@ -424,14 +457,10 @@ def reset_job(job_id: int) -> dict:
     """手动重置任务为 pending，将未完成的章节重置为 pending。
 
     用于处理卡在 processing 状态的任务（worker 崩溃/断线）。
-    超过最大重试次数的任务不允许重置。
     """
     job = fetch_one("SELECT book_id, retry_count FROM public.xm_jobs WHERE job_id = %s", (job_id,))
     if not job:
         return {"ok": False, "error": "任务不存在"}
-
-    if int(job.get("retry_count", 0)) >= MAX_RETRIES:
-        return {"ok": False, "error": f"已超过最大重试次数 ({MAX_RETRIES})，请删除任务后重新创建"}
 
     book_id = job["book_id"]
 
@@ -567,3 +596,91 @@ def get_pending_jobs_count() -> int:
     """获取待处理任务数。"""
     result = fetch_one("SELECT COUNT(*) as cnt FROM public.xm_jobs WHERE status = 'pending'")
     return int((result or {}).get("cnt", 0))
+
+
+def delete_job(job_id: int) -> dict:
+    """删除任务（不删除专辑和已上传的章节）。"""
+    job = fetch_one("SELECT book_id FROM public.xm_jobs WHERE job_id = %s", (job_id,))
+    if not job:
+        return {"ok": False, "error": "任务不存在"}
+
+    execute(
+        sql.SQL("DELETE FROM public.xm_jobs WHERE job_id = %s"),
+        (job_id,),
+    )
+    # 清除章节的 worker 归属（保留已上传的章节状态）
+    execute(
+        sql.SQL("""
+            UPDATE public.audiobook_chapters
+            SET worker_id = NULL, claimed_at = NULL
+            WHERE book_id = %s AND upload_status != 'uploaded'
+        """),
+        (job["book_id"],),
+    )
+    return {"ok": True, "job_id": job_id}
+
+
+def delete_jobs_batch(job_ids: list[int]) -> dict:
+    """批量删除任务。"""
+    if not job_ids:
+        return {"ok": True, "deleted": 0}
+    rows = fetch_all(
+        sql.SQL("SELECT DISTINCT book_id FROM public.xm_jobs WHERE job_id = ANY(%s)"),
+        (job_ids,),
+    )
+    execute(
+        sql.SQL("DELETE FROM public.xm_jobs WHERE job_id = ANY(%s)"),
+        (job_ids,),
+    )
+    for row in (rows or []):
+        execute(
+            sql.SQL("""
+                UPDATE public.audiobook_chapters
+                SET worker_id = NULL, claimed_at = NULL
+                WHERE book_id = %s AND upload_status != 'uploaded'
+            """),
+            (row["book_id"],),
+        )
+    return {"ok": True, "deleted": len(job_ids)}
+
+
+def reset_jobs_batch(job_ids: list[int]) -> dict:
+    """批量重置任务为 pending。"""
+    if not job_ids:
+        return {"ok": True, "reset": 0}
+    rows = fetch_all(
+        sql.SQL("SELECT job_id, book_id FROM public.xm_jobs WHERE job_id = ANY(%s)"),
+        (job_ids,),
+    )
+    for row in (rows or []):
+        execute(
+            sql.SQL("""
+                UPDATE public.xm_jobs
+                SET status = 'pending', worker_id = NULL, claimed_at = NULL,
+                    finished_at = NULL, error_message = NULL,
+                    retry_count = retry_count + 1
+                WHERE job_id = %s
+            """),
+            (row["job_id"],),
+        )
+        execute(
+            sql.SQL("""
+                UPDATE public.audiobook_chapters
+                SET upload_status = 'pending', worker_id = NULL, claimed_at = NULL
+                WHERE book_id = %s AND upload_status != 'uploaded'
+            """),
+            (row["book_id"],),
+        )
+    return {"ok": True, "reset": len(job_ids)}
+
+
+def delete_jobs_by_status(status: str) -> dict:
+    """按状态删除所有匹配的任务。"""
+    rows = fetch_all(
+        sql.SQL("SELECT job_id FROM public.xm_jobs WHERE status = %s"),
+        (status,),
+    )
+    job_ids = [r["job_id"] for r in (rows or [])]
+    if not job_ids:
+        return {"ok": True, "deleted": 0}
+    return delete_jobs_batch(job_ids)

@@ -252,9 +252,9 @@ class ColabWorker:
                     proxy_url = proxies.get("http") or proxies.get("https")
                     if proxy_url:
                         pool.mark_dead(proxy_url)
-                return self._report_chapter(job_id, chapter_id, "failed", error_message=f"下载失败: {status}")
+                return self._report_chapter(job_id, chapter_id, "pending", error_message=f"下载失败: {status}")
             if status == "skipped" and file_size < 1000:
-                return self._report_chapter(job_id, chapter_id, "failed", error_message="文件太小")
+                return self._report_chapter(job_id, chapter_id, "pending", error_message="文件太小")
 
             time.sleep(download_interval)
 
@@ -267,7 +267,7 @@ class ColabWorker:
             interval = self.config.get("tg_upload_interval", 3.0)
 
             if not bot_tokens or not chat_id:
-                return self._report_chapter(job_id, chapter_id, "failed",
+                return self._report_chapter(job_id, chapter_id, "pending",
                                            error_message="TG Bot Token 或 Chat ID 未配置")
 
             logger.info(f"  上传原始音频TG: {chapter_name}")
@@ -332,7 +332,7 @@ class ColabWorker:
             )
 
             if not result.get("ok"):
-                return self._report_chapter(job_id, chapter_id, "failed",
+                return self._report_chapter(job_id, chapter_id, "pending",
                                            error_message=result.get("error", "上传失败"))
 
             # ─── 5. 上报结果 ───
@@ -348,7 +348,7 @@ class ColabWorker:
 
         except Exception as e:
             logger.error(f"  章节处理异常: {e}", exc_info=True)
-            return self._report_chapter(job_id, chapter_id, "failed", error_message=str(e))
+            return self._report_chapter(job_id, chapter_id, "pending", error_message=str(e))
         finally:
             # 清理临时文件
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -391,7 +391,12 @@ class ColabWorker:
     def complete_job(self, job_id: int, result: dict | None = None):
         """标记任务完成。"""
         resp = self._post(f"/api/jobs/{job_id}/complete", {"result": result})
-        logger.info(f"任务 #{job_id} 已完成")
+        if resp.get("requeued"):
+            remaining = resp.get("remaining", 0)
+            retry = resp.get("retry_count", 0)
+            logger.info(f"任务 #{job_id} 还有 {remaining} 个未完成章节，已重新入队 (第 {retry} 次重试)")
+        else:
+            logger.info(f"任务 #{job_id} 已完成")
         return resp
 
     def fail_job(self, job_id: int, error_message: str):
@@ -479,7 +484,7 @@ class ColabWorker:
                                                "note": f"{fail_count} chapters failed"})
 
                 jobs_done += 1
-                logger.info(f"任务 #{job_id} 完成: 成功={success_count}, 失败={fail_count}")
+                logger.info(f"任务 #{job_id} 处理结束: 成功={success_count}, 待重试={fail_count}")
 
         except KeyboardInterrupt:
             logger.info("用户中断")

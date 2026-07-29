@@ -11,14 +11,28 @@
 </div>
 
 <div class="card p-3 mb-3">
-    <div class="d-flex gap-2 align-items-center">
+    <div class="d-flex gap-2 align-items-center flex-wrap">
         <select id="job-status-filter" class="form-select form-select-sm" style="width:auto;" onchange="loadJobs(1)">
             <option value="">全部状态</option>
             <option value="pending">待处理</option>
             <option value="processing">处理中</option>
             <option value="done">完成</option>
-            <option value="failed">失败</option>
         </select>
+        <div class="vr"></div>
+        <button class="btn btn-sm btn-outline-warning" onclick="batchReset()" title="重置选中任务为待处理">
+            <i class="bi bi-arrow-clockwise"></i> 批量重置
+        </button>
+        <button class="btn btn-sm btn-outline-danger" onclick="batchDelete()" title="删除选中任务">
+            <i class="bi bi-trash"></i> 批量删除
+        </button>
+        <div class="vr"></div>
+        <button class="btn btn-sm btn-outline-secondary" onclick="deleteByStatus('done')" title="删除所有已完成任务">
+            <i class="bi bi-trash"></i> 清理已完成
+        </button>
+        <button class="btn btn-sm btn-outline-secondary" onclick="resetByStatus('processing')" title="重置所有处理中任务">
+            <i class="bi bi-arrow-clockwise"></i> 重置处理中
+        </button>
+        <span class="text-muted small ms-auto" id="selected-count"></span>
     </div>
 </div>
 
@@ -26,10 +40,13 @@
     <div class="table-responsive">
         <table class="table table-sm table-hover">
             <thead>
-                <tr><th>ID</th><th>专辑</th><th>类型</th><th>状态</th><th>进度</th><th>Worker</th><th>认领时间</th><th>完成时间</th><th>操作</th></tr>
+                <tr>
+                    <th style="width:30px;"><input type="checkbox" id="select-all" onchange="toggleAll(this)"></th>
+                    <th>ID</th><th>专辑</th><th>类型</th><th>状态</th><th>进度</th><th>Worker</th><th>认领时间</th><th>完成时间</th><th>操作</th>
+                </tr>
             </thead>
             <tbody id="jobs-tbody">
-                <tr><td colspan="9" class="text-center text-muted">加载中...</td></tr>
+                <tr><td colspan="10" class="text-center text-muted">加载中...</td></tr>
             </tbody>
         </table>
     </div>
@@ -67,6 +84,20 @@
 <script>
 let currentJobPage = 1;
 
+function getSelected() {
+    return [...document.querySelectorAll('.job-checkbox:checked')].map(cb => parseInt(cb.value));
+}
+
+function updateSelectedCount() {
+    const count = getSelected().length;
+    document.getElementById('selected-count').textContent = count > 0 ? `已选 ${count} 项` : '';
+}
+
+function toggleAll(el) {
+    document.querySelectorAll('.job-checkbox').forEach(cb => cb.checked = el.checked);
+    updateSelectedCount();
+}
+
 async function loadJobs(page) {
     currentJobPage = page;
     const status = document.getElementById('job-status-filter').value;
@@ -75,22 +106,31 @@ async function loadJobs(page) {
         const jobs = data.jobs || [];
         const html = jobs.map(j => {
             const progress = j.total_chapters > 0 ? `${j.done_chapters}/${j.total_chapters}` : '-';
-            const resetBtn = (j.status === 'processing' || j.status === 'failed')
-                ? `<button class="btn btn-sm btn-outline-warning py-0 px-1" onclick="resetJob(${j.job_id}, '${(j.book_name || j.book_id || '').replace(/'/g, "\\'")}')" title="重置为待处理"><i class="bi bi-arrow-clockwise"></i></button>`
-                : '';
+            const bookId = j.book_id || '';
+            const bookName = j.book_name || bookId || '-';
+            const albumLink = bookId
+                ? `<a href="/albums/${bookId}" class="text-decoration-none">${bookName}</a>`
+                : bookName;
             return `<tr>
+                <td><input type="checkbox" class="job-checkbox" value="${j.job_id}" onchange="updateSelectedCount()"></td>
                 <td>${j.job_id}</td>
-                <td>${j.book_name || j.book_id || '-'}</td>
+                <td>${albumLink}</td>
                 <td>${j.job_type || '-'}</td>
                 <td>${statusBadge(j.status)}</td>
                 <td>${progress}</td>
                 <td>${j.worker_id ? j.worker_id.substring(0, 12) : '-'}</td>
                 <td>${fmtTime(j.claimed_at)}</td>
                 <td>${fmtTime(j.finished_at)}</td>
-                <td>${resetBtn}</td>
+                <td class="text-nowrap">
+                    <a href="/albums/${bookId}" class="btn btn-sm btn-outline-info py-0 px-1" title="查看专辑"><i class="bi bi-eye"></i></a>
+                    <button class="btn btn-sm btn-outline-warning py-0 px-1" onclick="resetJob(${j.job_id}, '${bookName.replace(/'/g, "\\'")}')" title="重置为待处理"><i class="bi bi-arrow-clockwise"></i></button>
+                    <button class="btn btn-sm btn-outline-danger py-0 px-1" onclick="deleteJob(${j.job_id}, '${bookName.replace(/'/g, "\\'")}')" title="删除任务"><i class="bi bi-trash"></i></button>
+                </td>
             </tr>`;
         }).join('');
-        document.getElementById('jobs-tbody').innerHTML = html || '                <tr><td colspan="9" class="text-center text-muted">暂无任务</td></tr>';
+        document.getElementById('jobs-tbody').innerHTML = html || '<tr><td colspan="10" class="text-center text-muted">暂无任务</td></tr>';
+        document.getElementById('select-all').checked = false;
+        updateSelectedCount();
         document.getElementById('jobs-info').textContent = `共 ${data.total} 条，第 ${data.page}/${Math.ceil(data.total / data.page_size)} 页`;
 
         const totalPages = Math.ceil(data.total / data.page_size);
@@ -135,6 +175,97 @@ async function resetJob(jobId, bookName) {
         }
     } catch (e) {
         showToast('重置失败: ' + e.message, 'danger');
+    }
+}
+
+async function deleteJob(jobId, bookName) {
+    if (!confirm(`确定删除任务 #${jobId}（${bookName}）？\n已上传的章节不受影响，未完成的章节将清除归属。`)) return;
+    try {
+        const data = await api(`/api/jobs/${jobId}`, { method: 'DELETE' });
+        if (data.ok) {
+            showToast(`任务 #${jobId} 已删除`, 'success');
+            loadJobs(currentJobPage);
+        } else {
+            showToast('删除失败: ' + (data.error || '未知错误'), 'danger');
+        }
+    } catch (e) {
+        showToast('删除失败: ' + e.message, 'danger');
+    }
+}
+
+async function batchReset() {
+    const ids = getSelected();
+    if (!ids.length) { showToast('请先勾选任务', 'warning'); return; }
+    if (!confirm(`确定重置选中的 ${ids.length} 个任务为待处理？`)) return;
+    try {
+        const data = await api('/api/jobs/batch-reset', {
+            method: 'POST',
+            body: JSON.stringify({ job_ids: ids }),
+        });
+        if (data.ok) {
+            showToast(`已重置 ${data.reset} 个任务`, 'success');
+            loadJobs(currentJobPage);
+        } else {
+            showToast('批量重置失败', 'danger');
+        }
+    } catch (e) {
+        showToast('批量重置失败: ' + e.message, 'danger');
+    }
+}
+
+async function batchDelete() {
+    const ids = getSelected();
+    if (!ids.length) { showToast('请先勾选任务', 'warning'); return; }
+    if (!confirm(`确定删除选中的 ${ids.length} 个任务？\n已上传的章节不受影响。`)) return;
+    try {
+        const data = await api('/api/jobs/batch-delete', {
+            method: 'POST',
+            body: JSON.stringify({ job_ids: ids }),
+        });
+        if (data.ok) {
+            showToast(`已删除 ${data.deleted} 个任务`, 'success');
+            loadJobs(currentJobPage);
+        } else {
+            showToast('批量删除失败', 'danger');
+        }
+    } catch (e) {
+        showToast('批量删除失败: ' + e.message, 'danger');
+    }
+}
+
+async function deleteByStatus(status) {
+    const label = { done: '已完成', processing: '处理中', pending: '待处理' }[status] || status;
+    if (!confirm(`确定删除所有${label}任务？此操作不可撤销。`)) return;
+    try {
+        const data = await api(`/api/jobs/status/${status}`, { method: 'DELETE' });
+        if (data.ok) {
+            showToast(`已删除 ${data.deleted} 个${label}任务`, 'success');
+            loadJobs(1);
+        } else {
+            showToast('删除失败', 'danger');
+        }
+    } catch (e) {
+        showToast('删除失败: ' + e.message, 'danger');
+    }
+}
+
+async function resetByStatus(status) {
+    const label = { processing: '处理中', pending: '待处理' }[status] || status;
+    if (!confirm(`确定重置所有${label}任务为待处理？`)) return;
+    try {
+        const resp = await api(`/api/jobs?status=${status}&page=1&page_size=10000`);
+        const ids = (resp.jobs || []).map(j => j.job_id);
+        if (!ids.length) { showToast(`没有${label}任务`, 'info'); return; }
+        const data = await api('/api/jobs/batch-reset', {
+            method: 'POST',
+            body: JSON.stringify({ job_ids: ids }),
+        });
+        if (data.ok) {
+            showToast(`已重置 ${data.reset} 个${label}任务`, 'success');
+            loadJobs(1);
+        }
+    } catch (e) {
+        showToast('批量重置失败: ' + e.message, 'danger');
     }
 }
 

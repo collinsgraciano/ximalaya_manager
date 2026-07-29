@@ -112,14 +112,14 @@ function renderSettingGroup(name, items) {
         const val = s.setting_value || '';
         const inputType = isSecret ? 'password' : 'text';
 
-        // PROXY_LIST 渲染为 textarea（多行，每行一个代理）
-        if (s.setting_key === 'PROXY_LIST') {
+        // PROXY_LIST 和 PROXY_LIST_URL 渲染为 textarea（多行/多URL）
+        if (s.setting_key === 'PROXY_LIST' || s.setting_key === 'PROXY_LIST_URL') {
             return `<div class="mb-2">
                 <label class="form-label small mb-1">
                     ${s.setting_key}
                     ${s.description ? `<span class="text-muted"> — ${s.description}</span>` : ''}
                 </label>
-                <textarea class="form-control form-control-sm" data-key="${s.setting_key}" rows="5" placeholder="${s.description || ''}">${val}</textarea>
+                <textarea class="form-control form-control-sm" data-key="${s.setting_key}" rows="${s.setting_key === 'PROXY_LIST' ? 5 : 3}" placeholder="${s.description || ''}">${val}</textarea>
             </div>`;
         }
 
@@ -270,7 +270,7 @@ async function previewConfig() {
             ['tg_upload_interval', cfg.tg_upload_interval],
             ['proxy_enabled', cfg.proxy_enabled],
             ['proxy_list', (cfg.proxy_list || []).length + ' 个代理'],
-            ['proxy_list_url', cfg.proxy_list_url || '(空)'],
+            ['proxy_list_url', (cfg.proxy_list_url || '').split(',').filter(u => u.trim()).length + ' 个URL'],
             ['proxy_verify_country', cfg.proxy_verify_country || '中国'],
             ['proxy_max_tests', cfg.proxy_max_tests],
             ['proxy_refresh_hours', cfg.proxy_refresh_hours + ' 小时'],
