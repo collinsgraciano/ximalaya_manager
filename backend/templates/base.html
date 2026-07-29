@@ -83,7 +83,7 @@ function fmtTime(s) {
 }
 
 function statusBadge(status) {
-    const map = { pending: '待处理', uploaded: '已上传', failed: '失败', processing: '处理中', done: '完成' };
+    const map = { pending: '待处理', uploaded: '已上传', failed: '失败', processing: '处理中', done: '完成', success: '已完成' };
     return `<span class="badge badge-${status}">${map[status] || status}</span>`;
 }
 </script>

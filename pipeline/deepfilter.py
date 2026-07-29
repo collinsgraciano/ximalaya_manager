@@ -23,6 +23,14 @@ _DEEPFILTER_DIR = os.environ.get("DEEPFILTER_DIR", "/content/.deepfilter")
 _DEEPFILTER_BIN = "deep-filter-0.5.6-x86_64-unknown-linux-musl"
 DEEP_FILTER_PATH = os.path.join(_DEEPFILTER_DIR, _DEEPFILTER_BIN)
 
+# subprocess 默认超时（秒）
+_WGET_TIMEOUT = 120
+_FFMPEG_TIMEOUT = 600
+_DEEPFILTER_TIMEOUT = 1800
+
+# GTCRN denoiser 缓存（避免每章节重新加载模型）
+_gtcrn_denoiser = None
+
 DEEPFILTER_DOWNLOAD_URL = (
     "https://github.com/Rikorose/DeepFilterNet/releases/download/v0.5.6/"
     "deep-filter-0.5.6-x86_64-unknown-linux-musl"
@@ -67,7 +75,7 @@ def setup_deep_filter():
         subprocess.run(
             ["wget", "--tries=5", "--timeout=30", "--retry-connrefused",
              DEEPFILTER_DOWNLOAD_URL, "-O", DEEP_FILTER_PATH],
-            check=True,
+            check=True, timeout=_WGET_TIMEOUT,
         )
         os.chmod(DEEP_FILTER_PATH, 0o755)
         logger.info("DeepFilter 下载完成")
@@ -94,7 +102,7 @@ def _ensure_model(model: str) -> str:
             subprocess.run(
                 ["wget", "--tries=5", "--timeout=30", "--retry-connrefused",
                  DF3_MODEL_URL, "-O", DF3_MODEL_PATH],
-                check=True,
+                check=True, timeout=_WGET_TIMEOUT,
             )
             logger.info("DeepFilterNet3 模型下载完成")
             return DF3_MODEL_PATH
@@ -110,14 +118,18 @@ def _ensure_model(model: str) -> str:
 # ═══════════════════════════════════════════════════════════
 
 def _ensure_gtcrn():
-    """确保 GTCRN 模型和 sherpa-onnx 就绪, 返回 (denoiser, sample_rate)。"""
+    """确保 GTCRN 模型和 sherpa-onnx 就绪, 返回 denoiser 对象。模型缓存复用。"""
+    global _gtcrn_denoiser
+    if _gtcrn_denoiser is not None:
+        return _gtcrn_denoiser
+
     if not os.path.exists(GTCRN_MODEL_PATH) or os.path.getsize(GTCRN_MODEL_PATH) == 0:
         os.makedirs(_DEEPFILTER_DIR, exist_ok=True)
         logger.info("下载 GTCRN 模型...")
         subprocess.run(
             ["wget", "--tries=5", "--timeout=30", "--retry-connrefused",
              GTCRN_MODEL_URL, "-O", GTCRN_MODEL_PATH],
-            check=True,
+            check=True, timeout=_WGET_TIMEOUT,
         )
         logger.info("GTCRN 模型下载完成")
 
@@ -134,8 +146,8 @@ def _ensure_gtcrn():
     )
     if not config.validate():
         raise RuntimeError("GTCRN 配置无效")
-    denoiser = sherpa_onnx.OfflineSpeechDenoiser(config)
-    return denoiser
+    _gtcrn_denoiser = sherpa_onnx.OfflineSpeechDenoiser(config)
+    return _gtcrn_denoiser
 
 
 def _gtcrn_denoise(audio_path: str, output_wav: str) -> str:
@@ -148,7 +160,7 @@ def _gtcrn_denoise(audio_path: str, output_wav: str) -> str:
     subprocess.run(
         ["ffmpeg", "-y", "-i", audio_path, "-ar", "16000", "-ac", "1",
          "-sample_fmt", "s16", "-acodec", "pcm_s16le", tmp_16k],
-        capture_output=True, check=True,
+        capture_output=True, check=True, timeout=_FFMPEG_TIMEOUT,
     )
 
     data, sr = sf.read(tmp_16k, always_2d=True, dtype="float32")
@@ -172,7 +184,7 @@ def _split_audio_to_wav(input_file: str, output_dir: str, seg_minutes: int = 60,
     r = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
          "-of", "default=noprint_wrappers=1:nokey=1", input_file],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, timeout=60,
     )
     total = float(r.stdout.strip())
     seg_sec = seg_minutes * 60
@@ -186,7 +198,7 @@ def _split_audio_to_wav(input_file: str, output_dir: str, seg_minutes: int = 60,
             ["ffmpeg", "-ss", str(start), "-t", str(dur), "-i", input_file,
              "-vn", "-ar", str(sr), "-ac", "2", "-sample_fmt", "s16",
              "-acodec", "pcm_s16le", "-y", out],
-            capture_output=True, check=True,
+            capture_output=True, check=True, timeout=_FFMPEG_TIMEOUT,
         )
 
 
@@ -197,7 +209,7 @@ def _df_process_wav(wav_file: str, output_dir: str, model: str = DEFAULT_MODEL) 
     if model_path:
         cmd += ["-m", model_path]
     cmd += [wav_file, "--output-dir", output_dir]
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, timeout=_DEEPFILTER_TIMEOUT)
     return os.path.join(output_dir, os.path.basename(wav_file))
 
 
@@ -295,7 +307,7 @@ def denoise_audio_keep_format(audio_path: str, output_path: str = "",
                 else:
                     cmd += ["-codec:a", "libmp3lame", "-b:a", "192k"]
                 cmd.append(str(target))
-                subprocess.run(cmd, capture_output=True, check=True)
+                subprocess.run(cmd, capture_output=True, check=True, timeout=_FFMPEG_TIMEOUT)
             logger.info(f"降噪音频已写回: {target.name}")
             return str(target)
         finally:

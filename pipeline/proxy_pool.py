@@ -346,6 +346,11 @@ class ProxyPool:
                 "sorted": list(self._sorted_proxies),
             }
 
+    def get_alive_proxies(self) -> list[str]:
+        """返回当前存活的代理列表（副本）。"""
+        with self._lock:
+            return list(self._sorted_proxies)
+
 
 # ═══════════════════════════════════════════════════════════
 # 模块级单例

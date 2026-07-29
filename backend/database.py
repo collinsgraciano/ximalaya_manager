@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Sequence
 from psycopg import connect, sql
 from psycopg.rows import dict_row, tuple_row
@@ -10,38 +11,43 @@ from .settings import get_dsn
 
 
 # ═══════════════════════════════════════════════════════════
-# 连接池（惰性初始化）
+# 连接池（惰性初始化，线程安全）
 # ═══════════════════════════════════════════════════════════
 
 _pool = None
+_pool_lock = threading.Lock()
 _POOL_MIN = 1
 _POOL_MAX = 5
 _POOL_TIMEOUT = 10
 
 
 def _get_pool():
-    """获取或创建全局连接池。"""
+    """获取或创建全局连接池（线程安全，double-checked locking）。"""
     global _pool
     if _pool is not None:
         return _pool
 
-    try:
-        from psycopg_pool import ConnectionPool
-    except ImportError:
-        return None
+    with _pool_lock:
+        if _pool is not None:
+            return _pool
 
-    _pool = ConnectionPool(
-        conninfo=get_dsn(),
-        min_size=_POOL_MIN,
-        max_size=_POOL_MAX,
-        timeout=_POOL_TIMEOUT,
-        kwargs={
-            "autocommit": True,
-            "row_factory": dict_row,
-        },
-        open=True,
-    )
-    return _pool
+        try:
+            from psycopg_pool import ConnectionPool
+        except ImportError:
+            return None
+
+        _pool = ConnectionPool(
+            conninfo=get_dsn(),
+            min_size=_POOL_MIN,
+            max_size=_POOL_MAX,
+            timeout=_POOL_TIMEOUT,
+            kwargs={
+                "autocommit": True,
+                "row_factory": dict_row,
+            },
+            open=True,
+        )
+        return _pool
 
 
 def close_pool():

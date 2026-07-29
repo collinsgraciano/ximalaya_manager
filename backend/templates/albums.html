@@ -13,7 +13,7 @@
             <button class="btn btn-outline-info" id="btn-scrape-all-tracks" onclick="startAllTracksScrape()">
                 <i class="bi bi-list-ol"></i> 获取全部章节
             </button>
-            <button class="btn btn-outline-success" onclick="createAllJobs()">
+            <button class="btn btn-outline-success" data-bs-toggle="modal" data-bs-target="#createJobsModal">
                 <i class="bi bi-plus-circle"></i> 创建全部任务
             </button>
             <button class="btn btn-outline-danger" onclick="deleteAllAlbums()">
@@ -203,6 +203,36 @@
     </div>
 </div>
 
+<!-- 创建全部任务模态框 -->
+<div class="modal fade" id="createJobsModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">创建全部任务</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted small mb-2">筛选条件：未完成、不在任务队列、已获取章节且有 pending 章节的专辑</p>
+                <div class="mb-3">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <label class="form-label mb-0">选择分类（可多选，不选=全部分类）</label>
+                        <div>
+                            <button type="button" class="btn btn-sm btn-link p-0 me-2" onclick="document.querySelectorAll('.job-cat-checkbox').forEach(cb => cb.checked = true)">全选</button>
+                            <button type="button" class="btn btn-sm btn-link p-0" onclick="document.querySelectorAll('.job-cat-checkbox').forEach(cb => cb.checked = false)">取消</button>
+                        </div>
+                    </div>
+                    <div class="row g-2" id="job-categories-list" style="max-height: 250px; overflow-y: auto;">
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-success" onclick="doCreateAllJobs()">创建任务</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- 编辑专辑模态框 -->
 <div class="modal fade" id="editModal" tabindex="-1">
     <div class="modal-dialog">
@@ -254,22 +284,29 @@ let categoriesMap = {};
 let scrapePollTimer = null;
 
 async function loadCategories() {
-    const data = await api('/api/categories');
-    const cats = data.categories || {};
-    categoriesMap = cats;
+    try {
+        const data = await api('/api/categories');
+        const cats = data.categories || {};
+        categoriesMap = cats;
     const filterSel = document.getElementById('filter-category');
     const editSel = document.getElementById('edit-category');
     const catList = document.getElementById('scrape-categories-list');
+    const jobCatList = document.getElementById('job-categories-list');
     for (const [key, name] of Object.entries(cats)) {
         filterSel.innerHTML += `<option value="${key}">${name}</option>`;
         editSel.innerHTML += `<option value="${key}">${name}</option>`;
-        catList.innerHTML += `
+        const item = `
             <div class="col-md-4 col-6">
                 <div class="form-check">
                     <input type="checkbox" class="form-check-input cat-checkbox" id="cat-${key}" value="${key}">
                     <label class="form-check-label" for="cat-${key}">${name}</label>
                 </div>
             </div>`;
+        catList.innerHTML += item;
+        jobCatList.innerHTML += item.replace('cat-checkbox', 'job-cat-checkbox').replace(`id="cat-${key}"`, `id="jobcat-${key}"`).replace(`for="cat-${key}"`, `for="jobcat-${key}"`);
+    }
+    } catch (e) {
+        console.error('加载分类失败:', e);
     }
 }
 
@@ -483,12 +520,19 @@ async function deleteAlbum(bookId) {
 // 一键创建全部任务
 // ═══════════════════════════════════════
 
-async function createAllJobs() {
-    if (!confirm('确认为所有未完成、不在任务队列且已获取章节的专辑创建任务？')) return;
+async function doCreateAllJobs() {
+    const categories = Array.from(document.querySelectorAll('.job-cat-checkbox:checked')).map(cb => cb.value);
+    const catLabel = categories.length > 0 ? `（${categories.length} 个分类）` : '（全部分类）';
+    if (!confirm(`确认为符合条件的专辑创建任务？${catLabel}`)) return;
     try {
-        const data = await api('/api/albums/create-all-jobs', { method: 'POST' });
+        const body = categories.length > 0 ? { categories } : {};
+        const data = await api('/api/albums/create-all-jobs', {
+            method: 'POST',
+            body: JSON.stringify(body),
+        });
         if (data.ok) {
             showToast(`已创建 ${data.count} 个任务`, 'success');
+            bootstrap.Modal.getInstance(document.getElementById('createJobsModal')).hide();
         } else {
             showToast('创建失败: ' + (data.error || '未知错误'), 'danger');
         }
@@ -504,7 +548,7 @@ async function createAllJobs() {
 async function deleteAllAlbums() {
     if (!confirm('确认删除所有专辑及其所有章节？此操作不可撤销！')) return;
     if (!confirm('再次确认：真的要删除全部专辑吗？所有数据将永久丢失！')) return;
-    if (!confirm('最后确认：请输入"删除"以确认操作，或点击取消。\n（为防止误操作，请仔细确认）')) return;
+    if (!confirm('最后确认：此操作将永久删除所有数据，确定继续吗？')) return;
     try {
         const data = await api('/api/albums/all', { method: 'DELETE' });
         showToast(`已删除 ${data.deleted} 个专辑`, 'success');

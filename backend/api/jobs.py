@@ -19,6 +19,7 @@ from ..services.job_service import (
     delete_jobs_batch,
     reset_jobs_batch,
     delete_jobs_by_status,
+    reset_jobs_by_status,
 )
 from ..database import fetch_all, fetch_one
 
@@ -189,6 +190,12 @@ def api_batch_reset_jobs(req: BatchJobIds):
 def api_delete_jobs_by_status(status: str):
     """按状态删除所有匹配的任务。"""
     return delete_jobs_by_status(status)
+
+
+@router.post("/jobs/status/{status}/reset")
+def api_reset_jobs_by_status(status: str):
+    """按状态批量重置所有匹配的任务为 pending。"""
+    return reset_jobs_by_status(status)
 
 
 @router.post("/jobs/release")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from psycopg import sql
 from psycopg.types.json import Jsonb
@@ -110,7 +111,7 @@ def _do_proxy_refresh():
         if cache_raw:
             existing = json.loads(cache_raw).get("proxies", [])
 
-        merged = list(dict.fromkeys(existing + list(pool._sorted_proxies)))
+        merged = list(dict.fromkeys(existing + pool.get_alive_proxies()))
         _persist_alive_proxies(merged)
         logger.info(f"[代理刷新] DB 缓存已更新: {len(existing)} → {len(merged)} 个代理")
     except Exception as e:
@@ -158,7 +159,7 @@ _scrape_state: dict = {
     "finished_at": "",
 }
 _scrape_lock = threading.Lock()
-_scrape_stop_flag = False
+_scrape_stop_flag = threading.Event()
 
 
 def get_scrape_status() -> dict:
@@ -169,11 +170,10 @@ def get_scrape_status() -> dict:
 
 def stop_scrape() -> bool:
     """请求停止正在运行的采集任务。"""
-    global _scrape_stop_flag
     with _scrape_lock:
         if not _scrape_state["active"]:
             return False
-        _scrape_stop_flag = True
+        _scrape_stop_flag.set()
         _scrape_state["message"] = "正在停止..."
         return True
 
@@ -270,9 +270,6 @@ def _init_proxy_pool():
             logger.info(f"代理池健康检测(手动列表): {stats['alive']}/{stats['total']} 可用")
         return True, get_proxy()
 
-    # 启动后台代理刷新线程
-    _start_proxy_refresh_thread()
-
     # 模式2/3: 手动列表为空 → 读缓存或自动发现
     cached_proxies = None
     from_url = False
@@ -305,9 +302,10 @@ def _init_proxy_pool():
             stats = pool.health_check()
             logger.info(f"代理池健康检测(从URL获取): {stats['alive']}/{stats['total']} 可用")
 
-            if stats["dead"] > 0 and pool._sorted_proxies:
-                _persist_alive_proxies(list(pool._sorted_proxies))
-                logger.info(f"已更新缓存: 踢除 {stats['dead']} 个失效代理, 保留 {len(pool._sorted_proxies)} 个")
+            alive = pool.get_alive_proxies()
+            if stats["dead"] > 0 and alive:
+                _persist_alive_proxies(alive)
+                logger.info(f"已更新缓存: 踢除 {stats['dead']} 个失效代理, 保留 {len(alive)} 个")
 
             # 全部失效 → 清缓存重新发现
             if stats["alive"] == 0 and stats["total"] > 0:
@@ -325,8 +323,9 @@ def _init_proxy_pool():
                     if pool:
                         stats = pool.health_check()
                         logger.info(f"重新发现后健康检测: {stats['alive']}/{stats['total']} 可用")
-                        if pool._sorted_proxies:
-                            _persist_alive_proxies(list(pool._sorted_proxies))
+                        alive = pool.get_alive_proxies()
+                        if alive:
+                            _persist_alive_proxies(alive)
                 else:
                     logger.warning("重新发现代理失败，使用直连")
                     return False, {}
@@ -419,11 +418,10 @@ def _save_albums_to_db(albums: list[dict], category: str) -> int:
 def start_scrape(categories: list[str], max_pages: int = 0, sort: str = "default",
                  free_only: bool = False, max_albums: int = 0) -> bool:
     """启动后台采集任务（非阻塞）。如果已有任务在运行则返回 False。"""
-    global _scrape_stop_flag
     with _scrape_lock:
         if _scrape_state["active"]:
             return False
-        _scrape_stop_flag = False
+        _scrape_stop_flag.clear()
         _scrape_state.update({
             "active": True,
             "status": "running",
@@ -455,10 +453,6 @@ def start_scrape(categories: list[str], max_pages: int = 0, sort: str = "default
 def _scrape_background(categories: list[str], max_pages: int, sort: str,
                        free_only: bool, max_albums: int):
     """后台采集线程函数。"""
-    global _scrape_stop_flag
-
-    import time as _time
-
     cookie = get_xm_cookie()
     headers = _build_headers(cookie)
     proxy_enabled, proxies = _init_proxy_pool()
@@ -473,19 +467,19 @@ def _scrape_background(categories: list[str], max_pages: int, sort: str,
             _scrape_state["log"] = _scrape_state["log"][-100:]
 
     def _should_stop():
-        return _scrape_stop_flag
+        return _scrape_stop_flag.is_set()
 
     try:
         for idx, cat in enumerate(categories):
-            if _scrape_stop_flag:
+            if _scrape_stop_flag.is_set():
                 _log("用户手动停止")
                 break
 
             # 分类之间间隔 3 秒
             if idx > 0:
                 _log("分类切换间隔 3 秒...")
-                _time.sleep(3)
-                if _scrape_stop_flag:
+                time.sleep(3)
+                if _scrape_stop_flag.is_set():
                     break
 
             cat_info = CATEGORIES.get(cat)
@@ -542,15 +536,15 @@ def _scrape_background(categories: list[str], max_pages: int, sort: str,
             execute(
                 sql.SQL("UPDATE public.xm_scrape_tasks SET status = %s, total_albums = %s, "
                         "processed_albums = %s, finished_at = now() WHERE task_id = %s"),
-                ("cancelled" if _scrape_stop_flag else "done",
+                ("cancelled" if _scrape_stop_flag.is_set() else "done",
                  cat_stats["total"], cat_stats["saved"], task_id),
             )
             _log(f"分类 {cat_name} 完成: {cat_stats['total']} 个专辑, 入库 {cat_stats['saved']}")
 
         with _scrape_lock:
-            _scrape_state["status"] = "stopped" if _scrape_stop_flag else "done"
+            _scrape_state["status"] = "stopped" if _scrape_stop_flag.is_set() else "done"
             _scrape_state["active"] = False
-            _scrape_state["message"] = "已停止" if _scrape_stop_flag else "采集完成"
+            _scrape_state["message"] = "已停止" if _scrape_stop_flag.is_set() else "采集完成"
             _scrape_state["finished_at"] = datetime.now().strftime("%H:%M:%S")
 
     except Exception as e:
@@ -623,7 +617,6 @@ def scrape_album_tracks(book_id: str, proxies: dict | None = None) -> dict:
     if book_row and book_row.get("book_data"):
         book_data = book_row["book_data"]
         if isinstance(book_data, str):
-            import json
             book_data = json.loads(book_data)
         book_data["chapters"] = [
             {
@@ -776,7 +769,7 @@ _tracks_state: dict = {
     "finished_at": "",
 }
 _tracks_lock = threading.Lock()
-_tracks_stop_flag = False
+_tracks_stop_flag = threading.Event()
 
 
 def get_tracks_status() -> dict:
@@ -785,21 +778,19 @@ def get_tracks_status() -> dict:
 
 
 def stop_tracks_scrape() -> bool:
-    global _tracks_stop_flag
     with _tracks_lock:
         if not _tracks_state["active"]:
             return False
-        _tracks_stop_flag = True
+        _tracks_stop_flag.set()
         _tracks_state["message"] = "正在停止..."
         return True
 
 
 def start_scrape_all_tracks(max_workers: int = 5) -> bool:
-    global _tracks_stop_flag
     with _tracks_lock:
         if _tracks_state["active"]:
             return False
-        _tracks_stop_flag = False
+        _tracks_stop_flag.clear()
         _tracks_state.update({
             "active": True,
             "status": "running",
@@ -820,8 +811,6 @@ def start_scrape_all_tracks(max_workers: int = 5) -> bool:
 
 
 def _scrape_all_tracks_background(max_workers: int = 5):
-    global _tracks_stop_flag
-
     cookie = get_xm_cookie()
     headers = _build_headers(cookie)
     proxy_enabled, _ = _init_proxy_pool()
@@ -834,12 +823,12 @@ def _scrape_all_tracks_background(max_workers: int = 5):
 
     def _scrape_one_book(idx: int, total: int, book_id: str, book_name: str):
         """单个专辑章节采集任务（在线程池中执行）。"""
-        if _tracks_stop_flag:
+        if _tracks_stop_flag.is_set():
             return
 
         max_retries = 3
         for attempt in range(max_retries):
-            if _tracks_stop_flag:
+            if _tracks_stop_flag.is_set():
                 return
 
             # 每次尝试随机选不同代理
@@ -922,7 +911,7 @@ def _scrape_all_tracks_background(max_workers: int = 5):
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {}
             for idx, row in enumerate(rows):
-                if _tracks_stop_flag:
+                if _tracks_stop_flag.is_set():
                     break
                 book_id = row["book_id"]
                 book_name = row.get("book_name", book_id)
@@ -930,7 +919,7 @@ def _scrape_all_tracks_background(max_workers: int = 5):
                 futures[future] = book_name
 
             for future in as_completed(futures):
-                if _tracks_stop_flag:
+                if _tracks_stop_flag.is_set():
                     break
                 try:
                     future.result()
@@ -941,9 +930,9 @@ def _scrape_all_tracks_background(max_workers: int = 5):
                     _log(f"  未捕获异常 {book_name}: {e}")
 
         with _tracks_lock:
-            _tracks_state["status"] = "stopped" if _tracks_stop_flag else "done"
+            _tracks_state["status"] = "stopped" if _tracks_stop_flag.is_set() else "done"
             _tracks_state["active"] = False
-            _tracks_state["message"] = "已停止" if _tracks_stop_flag else "全部完成"
+            _tracks_state["message"] = "已停止" if _tracks_stop_flag.is_set() else "全部完成"
             _tracks_state["finished_at"] = datetime.now().strftime("%H:%M:%S")
 
     except Exception as e:

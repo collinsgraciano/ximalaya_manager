@@ -280,10 +280,15 @@ def api_scrape_all_tracks_stop():
 # 一键为所有待处理专辑创建任务
 # ═══════════════════════════════════════
 
+class CreateAllJobsRequest(BaseModel):
+    categories: list[str] | None = None
+
+
 @router.post("/albums/create-all-jobs")
-def api_create_all_jobs():
+def api_create_all_jobs(req: CreateAllJobsRequest | None = None):
     from ..services.job_service import create_jobs_for_all_pending
-    jobs = create_jobs_for_all_pending()
+    categories = req.categories if req else None
+    jobs = create_jobs_for_all_pending(categories)
     return {"ok": True, "count": len(jobs), "jobs": jobs}
 
 

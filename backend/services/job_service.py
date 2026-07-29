@@ -59,13 +59,24 @@ def create_jobs_batch(book_ids: list[str]) -> list[dict]:
     return results
 
 
-def create_jobs_for_all_pending() -> list[dict]:
-    """为未完成、不在任务队列且已获取章节的专辑创建任务。"""
+def create_jobs_for_all_pending(categories: list[str] | None = None) -> list[dict]:
+    """为未完成、不在任务队列且已获取章节的专辑创建任务。
+
+    Args:
+        categories: 可选分类列表，仅在这些分类中筛选。None=所有分类。
+    """
     # 筛选条件：
     # 1. book_status != 'success'（未完成）
     # 2. 已有章节记录（已获取章节信息）
     # 3. 有 pending 章节
     # 4. 没有 pending/processing 任务（不在任务队列）
+    # 5. 可选：限定分类
+    cat_clause = sql.SQL("")
+    params: list = []
+    if categories:
+        cat_clause = sql.SQL(" AND b.category = ANY(%s)")
+        params.append(categories)
+
     rows = fetch_all(
         sql.SQL("""
             SELECT DISTINCT b.book_id
@@ -84,8 +95,10 @@ def create_jobs_for_all_pending() -> list[dict]:
                   WHERE j.book_id = b.book_id
                     AND j.status IN ('pending', 'processing')
               )
+              {cat_clause}
             ORDER BY b.book_id
-        """),
+        """).format(cat_clause=cat_clause),
+        tuple(params) if params else None,
     )
 
     results = []
@@ -116,10 +129,10 @@ def _reset_stale_jobs():
                 NOT EXISTS (
                     SELECT 1 FROM public.xm_worker_stats s
                     WHERE s.worker_id = xm_jobs.worker_id
-                      AND s.last_seen_at > now() - make_interval(secs => %s)
+                      AND s.last_seen_at > now() - (%s * interval '1 second')
                 )
                 -- 兜底：认领超过 60 分钟无论如何回收
-                OR claimed_at < now() - make_interval(mins => %s)
+                OR claimed_at < now() - (%s * interval '1 minute')
               )
         """),
         (STALE_JOB_HEARTBEAT_SECONDS, STALE_JOB_FALLBACK_MINUTES),
@@ -252,8 +265,9 @@ def update_chapter_result(
     if original_telegram_bot_user_id is not None:
         update_data["original_telegram_bot_user_id"] = original_telegram_bot_user_id
     if upload_status == "uploaded":
-        from datetime import datetime
-        update_data["uploaded_at"] = datetime.now().isoformat()
+        # 使用 UTC 时间避免 Colab Worker 与 VPS 时区不一致
+        from datetime import datetime, timezone
+        update_data["uploaded_at"] = datetime.now(timezone.utc)
     else:
         # 失败回退为 pending：清除 worker 归属，使下次可被重新认领
         update_data["worker_id"] = None
@@ -307,7 +321,7 @@ def complete_job(job_id: int, result: dict | None = None) -> dict:
     - 全部章节已上传 → status='done', book_status='success'
     - 仍有 pending → 重新入队 (status='pending', retry_count++)，无限重试直到全部完成
     """
-    job = fetch_one("SELECT book_id, retry_count FROM public.xm_jobs WHERE job_id = %s", (job_id,))
+    job = fetch_one("SELECT book_id, retry_count, worker_id FROM public.xm_jobs WHERE job_id = %s", (job_id,))
     if not job:
         return {"ok": False, "error": "任务不存在"}
 
@@ -364,9 +378,8 @@ def complete_job(job_id: int, result: dict | None = None) -> dict:
     )
 
     # 更新 Worker 统计
-    job_row = fetch_one("SELECT worker_id FROM public.xm_jobs WHERE job_id = %s", (job_id,))
-    if job_row and job_row.get("worker_id"):
-        _update_worker_stats(job_row["worker_id"], success=True, chapters=0)
+    if job.get("worker_id"):
+        _update_worker_stats(job["worker_id"], success=True, chapters=0)
 
     return {"ok": True, "job_id": job_id, "requeued": False,
             "book_status": "success", "remaining": 0}
@@ -374,6 +387,8 @@ def complete_job(job_id: int, result: dict | None = None) -> dict:
 
 def fail_job(job_id: int, error_message: str) -> dict:
     """标记任务失败。"""
+    job = fetch_one("SELECT book_id, worker_id FROM public.xm_jobs WHERE job_id = %s", (job_id,))
+
     execute(
         sql.SQL("""
             UPDATE public.xm_jobs
@@ -384,14 +399,12 @@ def fail_job(job_id: int, error_message: str) -> dict:
         (error_message, job_id),
     )
 
-    # 更新 books.book_status
-    job = fetch_one("SELECT book_id FROM public.xm_jobs WHERE job_id = %s", (job_id,))
+    # 更新 books.book_status + 重置未完成章节
     if job:
         execute(
             sql.SQL("UPDATE public.books SET book_status = 'failed', updated_at = now() WHERE book_id = %s"),
             (job["book_id"],),
         )
-        # 重置未完成的章节状态
         execute(
             sql.SQL("""
                 UPDATE public.audiobook_chapters
@@ -402,9 +415,8 @@ def fail_job(job_id: int, error_message: str) -> dict:
         )
 
     # 更新 Worker 统计
-    job_row = fetch_one("SELECT worker_id FROM public.xm_jobs WHERE job_id = %s", (job_id,))
-    if job_row and job_row.get("worker_id"):
-        _update_worker_stats(job_row["worker_id"], success=False, chapters=0)
+    if job and job.get("worker_id"):
+        _update_worker_stats(job["worker_id"], success=False, chapters=0)
 
     return {"ok": True, "job_id": job_id, "error": error_message}
 
@@ -684,3 +696,15 @@ def delete_jobs_by_status(status: str) -> dict:
     if not job_ids:
         return {"ok": True, "deleted": 0}
     return delete_jobs_batch(job_ids)
+
+
+def reset_jobs_by_status(status: str) -> dict:
+    """按状态重置所有匹配的任务为 pending。"""
+    rows = fetch_all(
+        sql.SQL("SELECT job_id FROM public.xm_jobs WHERE status = %s"),
+        (status,),
+    )
+    job_ids = [r["job_id"] for r in (rows or [])]
+    if not job_ids:
+        return {"ok": True, "reset": 0}
+    return reset_jobs_batch(job_ids)

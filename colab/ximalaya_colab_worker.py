@@ -98,7 +98,7 @@ class ColabWorker:
         params["worker_token"] = self.worker_token
         params["worker_id"] = self.worker_id
         url = f"{self.vps_url}{path}"
-        resp = requests.get(url, params=params, timeout=30)
+        resp = requests.get(url, params=params, timeout=60)
         return resp.json()
 
     def _post(self, path: str, data: dict | None = None) -> dict:
@@ -108,7 +108,7 @@ class ColabWorker:
             url,
             json=data or {},
             params={"worker_token": self.worker_token, "worker_id": self.worker_id},
-            timeout=30,
+            timeout=60,
         )
         return resp.json()
 

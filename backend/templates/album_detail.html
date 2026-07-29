@@ -137,8 +137,12 @@ let albumData = null;
 let categoriesMap = {};
 
 async function loadCategories() {
-    const data = await api('/api/categories');
-    categoriesMap = data.categories || {};
+    try {
+        const data = await api('/api/categories');
+        categoriesMap = data.categories || {};
+    } catch (e) {
+        console.error('加载分类失败:', e);
+    }
 }
 
 async function loadAlbum() {

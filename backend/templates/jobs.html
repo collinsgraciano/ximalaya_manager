@@ -253,13 +253,7 @@ async function resetByStatus(status) {
     const label = { processing: '处理中', pending: '待处理' }[status] || status;
     if (!confirm(`确定重置所有${label}任务为待处理？`)) return;
     try {
-        const resp = await api(`/api/jobs?status=${status}&page=1&page_size=10000`);
-        const ids = (resp.jobs || []).map(j => j.job_id);
-        if (!ids.length) { showToast(`没有${label}任务`, 'info'); return; }
-        const data = await api('/api/jobs/batch-reset', {
-            method: 'POST',
-            body: JSON.stringify({ job_ids: ids }),
-        });
+        const data = await api(`/api/jobs/status/${status}/reset`, { method: 'POST' });
         if (data.ok) {
             showToast(`已重置 ${data.reset} 个${label}任务`, 'success');
             loadJobs(1);

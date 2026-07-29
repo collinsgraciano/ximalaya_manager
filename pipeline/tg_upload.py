@@ -216,9 +216,10 @@ def upload_with_token_rotation(
     ordered_tokens = bot_tokens[start_idx:] + bot_tokens[:start_idx]
     used_idx = start_idx  # 实际使用的 Token 在原数组中的索引
 
+    acquired = False
     if serial:
-        while not _UPLOAD_LOCK.acquire(timeout=2):
-            pass
+        _UPLOAD_LOCK.acquire()
+        acquired = True
 
     try:
         result = upload_audio_to_telegram(
@@ -241,5 +242,5 @@ def upload_with_token_rotation(
         result["bot_token_idx"] = used_idx
         return result
     finally:
-        if serial:
+        if acquired:
             _UPLOAD_LOCK.release()
