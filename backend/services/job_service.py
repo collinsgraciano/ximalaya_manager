@@ -240,7 +240,10 @@ def claim_job(worker_id: str) -> dict | None:
                 (book_id,),
             )
             tc_row = cur.fetchone()
-            total_chapters = int(tc_row[0] if tc_row else 0) if tc_row else 0
+            total_chapters = 0
+            if tc_row:
+                val = list(tc_row.values())[0]
+                total_chapters = int(val) if val is not None else 0
             if total_chapters > 0:
                 # 章节未采集，放弃认领（rollback 会撤销 UPDATE）
                 return None
