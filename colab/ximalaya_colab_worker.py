@@ -296,28 +296,27 @@ class ColabWorker:
             # ─── 3. DeepFilter 降噪 ───
             if self.config.get("enable_deepfilter", True):
                 logger.info(f"  降噪中: {chapter_name}")
-                try:
-                    from pipeline.deepfilter import denoise_audio_keep_format, setup_deep_filter
+                from pipeline.deepfilter import denoise_audio_keep_format, setup_deep_filter
 
-                    model = self.config.get("deepfilter_model", "DeepFilterNet2")
+                model = self.config.get("deepfilter_model", "DeepFilterNet2")
 
-                    # GTCRN 不需要 deep-filter 二进制
-                    if model != "GTCRN":
-                        if not os.path.exists(
-                            os.path.join(os.environ.get("DEEPFILTER_DIR", "/content/.deepfilter"),
-                                         "deep-filter-0.5.6-x86_64-unknown-linux-musl")
-                        ):
-                            setup_deep_filter()
+                # GTCRN 不需要 deep-filter 二进制
+                if model != "GTCRN":
+                    if not os.path.exists(
+                        os.path.join(os.environ.get("DEEPFILTER_DIR", "/content/.deepfilter"),
+                                     "deep-filter-0.5.6-x86_64-unknown-linux-musl")
+                    ):
+                        setup_deep_filter()
 
-                    seg_min = self.config.get("deepfilter_segment_minutes", 60)
-                    denoised_path = audio_path.replace(".m4a", "_denoised.m4a")
-                    denoised_path = denoise_audio_keep_format(audio_path, denoised_path, seg_min, model=model)
+                seg_min = self.config.get("deepfilter_segment_minutes", 60)
+                denoised_path = audio_path.replace(".m4a", "_denoised.m4a")
+                denoised_path = denoise_audio_keep_format(audio_path, denoised_path, seg_min, model=model)
 
-                    # 用降噪后的文件
-                    if os.path.exists(denoised_path) and os.path.getsize(denoised_path) > 0:
-                        audio_path = denoised_path
-                except Exception as e:
-                    logger.warning(f"  降噪失败，使用原始音频: {e}")
+                # 用降噪后的文件
+                if os.path.exists(denoised_path) and os.path.getsize(denoised_path) > 0:
+                    audio_path = denoised_path
+                else:
+                    raise RuntimeError(f"降噪输出文件无效: {denoised_path}")
 
             # ─── 4. 上传降噪后音频到 Telegram ───
             logger.info(f"  上传TG: {chapter_name}")
@@ -348,7 +347,8 @@ class ColabWorker:
 
         except Exception as e:
             logger.error(f"  章节处理异常: {e}", exc_info=True)
-            return self._report_chapter(job_id, chapter_id, "pending", error_message=str(e))
+            logger.error(f"  Worker 中止运行。请修复问题后重新运行。")
+            raise
         finally:
             # 清理临时文件
             shutil.rmtree(tmp_dir, ignore_errors=True)

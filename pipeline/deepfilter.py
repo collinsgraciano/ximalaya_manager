@@ -133,7 +133,14 @@ def _ensure_gtcrn():
         )
         logger.info("GTCRN 模型下载完成")
 
-    import sherpa_onnx
+    try:
+        import sherpa_onnx
+    except ImportError:
+        logger.info("安装 sherpa-onnx + soundfile...")
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q",
+                        "sherpa-onnx", "soundfile"], check=True)
+        import sherpa_onnx
+
     config = sherpa_onnx.OfflineSpeechDenoiserConfig(
         model=sherpa_onnx.OfflineSpeechDenoiserModelConfig(
             gtcrn=sherpa_onnx.OfflineSpeechDenoiserGtcrnModelConfig(
