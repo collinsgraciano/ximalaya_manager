@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from contextlib import contextmanager
 from typing import Any, Sequence
 from psycopg import connect, sql
 from psycopg.rows import dict_row, tuple_row
@@ -159,6 +160,32 @@ def table_identifier(table_name: str):
     return sql.Identifier("public", table_name)
 
 
+@contextmanager
+def transaction():
+    """获取非 autocommit 连接，用于需要原子性的多语句操作。
+
+    用法:
+        with transaction() as conn:
+            cur = conn.cursor(row_factory=dict_row)
+            cur.execute("UPDATE ...")
+            cur.execute("SELECT ...")
+            row = cur.fetchone()
+    """
+    pool = _get_pool()
+    if pool is not None:
+        with pool.connection() as conn:
+            conn.autocommit = False
+            try:
+                yield conn
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+    else:
+        with connect(get_dsn(), autocommit=False, row_factory=dict_row) as conn:
+            yield conn
+
+
 # ═══════════════════════════════════════════════════════════
 # 重导出
 # ═══════════════════════════════════════════════════════════
@@ -166,5 +193,5 @@ def table_identifier(table_name: str):
 __all__ = [
     "fetch_one", "fetch_all", "fetch_val",
     "execute", "execute_batch", "execute_returning",
-    "close_pool", "table_identifier",
+    "close_pool", "table_identifier", "transaction",
 ]

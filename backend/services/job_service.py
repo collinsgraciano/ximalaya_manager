@@ -144,99 +144,121 @@ def _reset_stale_jobs():
 # ═══════════════════════════════════════════════════════════
 
 def claim_job(worker_id: str) -> dict | None:
-    """原子认领一个待处理任务。
+    """原子认领一个待处理任务（单一事务，防止竞态）。
 
-    优先找回自己之前未完成的 processing 任务（worker 重启场景）。
-    否则用 FOR UPDATE SKIP LOCKED 认领一个新的 pending 任务。
+    流程：
+    1. 回收超时任务
+    2. 优先找回自己 processing 的任务（worker 重启恢复）
+    3. 原子认领新 pending 任务（防止同一 worker 认领多个、防止两个 job 处理同一专辑）
+    4. 获取 pending 章节列表
+    5. 章节未入库检查（total_chapters > 0 但无章节 → 放弃）
+    6. 标记章节归属
     """
-    # 先回收超时任务
-    _reset_stale_jobs()
+    from ..database import transaction
+    from psycopg.rows import dict_row
 
-    # 优先找回自己 processing 的任务（worker 重启后恢复）
-    job = fetch_one(
-        sql.SQL("""
-            SELECT * FROM public.xm_jobs
-            WHERE worker_id = %s AND status = 'processing'
-            ORDER BY claimed_at DESC
-            LIMIT 1
-        """),
-        (worker_id,),
-    )
-    reclaimed = False
+    with transaction() as conn:
+        cur = conn.cursor(row_factory=dict_row)
 
-    if not job:
-        # 检查该 worker 是否已有 processing 任务（防止同时认领多个任务）
-        existing = fetch_one(
-            sql.SQL("SELECT 1 FROM public.xm_jobs WHERE worker_id = %s AND status = 'processing' LIMIT 1"),
+        # 1. 回收超时任务
+        cur.execute(
+            """
+            UPDATE public.xm_jobs
+            SET status = 'pending', worker_id = NULL, claimed_at = NULL
+            WHERE status = 'processing'
+              AND (
+                NOT EXISTS (
+                    SELECT 1 FROM public.xm_worker_stats s
+                    WHERE s.worker_id = xm_jobs.worker_id
+                      AND s.last_seen_at > now() - (%s * interval '1 second')
+                )
+                OR claimed_at < now() - (%s * interval '1 minute')
+              )
+            """,
+            (STALE_JOB_HEARTBEAT_SECONDS, STALE_JOB_FALLBACK_MINUTES),
+        )
+
+        # 2. 优先找回自己 processing 的任务
+        cur.execute(
+            "SELECT * FROM public.xm_jobs WHERE worker_id = %s AND status = 'processing' ORDER BY claimed_at DESC LIMIT 1",
             (worker_id,),
         )
-        if existing:
-            return None
+        row = cur.fetchone()
+        reclaimed = row is not None
 
-        # 认领新的 pending 任务（无重试次数限制）
-        job = execute_returning(
-            sql.SQL("""
+        # 3. 原子认领新 pending 任务
+        if not row:
+            cur.execute(
+                """
                 UPDATE public.xm_jobs
                 SET status = 'processing', worker_id = %s, claimed_at = now()
                 WHERE job_id IN (
-                    SELECT job_id FROM public.xm_jobs
-                    WHERE status = 'pending'
-                    ORDER BY created_at
+                    SELECT j.job_id FROM public.xm_jobs j
+                    WHERE j.status = 'pending'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM public.xm_jobs j2
+                          WHERE j2.worker_id = %s AND j2.status = 'processing'
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM public.xm_jobs j3
+                          WHERE j3.book_id = j.book_id
+                            AND j3.status = 'processing'
+                            AND j3.job_id != j.job_id
+                      )
+                    ORDER BY j.created_at
                     LIMIT 1
                     FOR UPDATE SKIP LOCKED
                 )
                 RETURNING *
-            """),
-            (worker_id,),
-        )
+                """,
+                (worker_id, worker_id),
+            )
+            row = cur.fetchone()
 
-    if not job:
-        return None
+        if not row:
+            return None
 
-    if reclaimed or job.get("worker_id") == worker_id:
-        reclaimed = True
+        job = dict(row)
 
-    # 获取该专辑的待处理章节列表
-    book_id = job["book_id"]
-    chapters = fetch_all(
-        sql.SQL("""
+        # 4. 获取 pending 章节列表
+        book_id = job["book_id"]
+        cur.execute(
+            """
             SELECT chapter_id, chapter_name, audio_url, chapter_order, duration
             FROM public.audiobook_chapters
             WHERE book_id = %s AND upload_status = 'pending'
             ORDER BY chapter_order
-        """),
-        (book_id,),
-    )
-
-    # 如果没有 pending 章节但 books.total_chapters > 0，说明章节未入库
-    if not chapters:
-        total_chapters = fetch_val(
-            "SELECT COALESCE(total_chapters, 0) FROM public.books WHERE book_id = %s",
+            """,
             (book_id,),
         )
-        total_chapters = int(total_chapters or 0)
-        if total_chapters > 0:
-            # 章节未采集，放弃任务
-            execute(
-                sql.SQL("UPDATE public.xm_jobs SET status = 'pending', worker_id = NULL, claimed_at = NULL WHERE job_id = %s"),
-                (job["job_id"],),
-            )
-            return None
+        chapters = [dict(r) for r in cur.fetchall()]
 
-    # 认领章节（标记 worker_id + claimed_at）
-    if chapters:
-        execute(
-            sql.SQL("""
+        # 5. 章节未入库检查
+        if not chapters:
+            cur.execute(
+                "SELECT COALESCE(total_chapters, 0) FROM public.books WHERE book_id = %s",
+                (book_id,),
+            )
+            tc_row = cur.fetchone()
+            total_chapters = int(tc_row[0] if tc_row else 0) if tc_row else 0
+            if total_chapters > 0:
+                # 章节未采集，放弃认领（rollback 会撤销 UPDATE）
+                return None
+
+        # 6. 标记章节归属
+        if chapters:
+            cur.execute(
+                """
                 UPDATE public.audiobook_chapters
                 SET worker_id = %s, claimed_at = now()
                 WHERE book_id = %s AND upload_status = 'pending'
-            """),
-            (worker_id, book_id),
-        )
+                """,
+                (worker_id, book_id),
+            )
 
-    job["chapters"] = chapters or []
-    job["reclaimed"] = reclaimed
-    return job
+        job["chapters"] = chapters
+        job["reclaimed"] = reclaimed
+        return job
 
 
 # ═══════════════════════════════════════════════════════════
