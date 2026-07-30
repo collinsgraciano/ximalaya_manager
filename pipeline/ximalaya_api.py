@@ -13,6 +13,7 @@ import re
 import base64
 import binascii
 import logging
+from html import unescape
 from typing import Any
 
 try:
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://www.ximalaya.com"
 
 ALBUMS_API = BASE_URL + "/revision/category/v2/albums"
+ALBUM_INFO_API = BASE_URL + "/revision/album/v1/simple"
 ALL_CATEGORY_INFO_API = BASE_URL + "/revision/category/allCategoryInfo"
 METADATA_INFO_API = BASE_URL + "/revision/category/v2/metadata/info"
 
@@ -113,6 +115,83 @@ def crack_playurl(ciphertext: str) -> str:
     padded = ciphertext + "=" * (4 - len(ciphertext) % 4)
     plaintext = cipher.decrypt(base64.urlsafe_b64decode(padded))
     return re.sub(r"[^\x20-\x7E]", "", plaintext.decode("utf-8"))
+
+
+# ═══════════════════════════════════════════════════════════
+# 工具函数
+# ═══════════════════════════════════════════════════════════
+
+def strip_html(html_str: str) -> str:
+    """去除 HTML 标签，返回纯文本。"""
+    if not html_str:
+        return ""
+    text = re.sub(r'<img[^>]*>', '', html_str)
+    text = re.sub(r'<[^>]+>', '', text)
+    text = unescape(text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
+def fix_cover_url(cover: str) -> str:
+    """修复封面 URL（补全 https: 前缀）。"""
+    if not cover:
+        return ""
+    if cover.startswith("//"):
+        return "https:" + cover
+    if cover.startswith("http://"):
+        return "https:" + cover[5:]
+    if not cover.startswith("http"):
+        return "https://" + cover
+    return cover
+
+
+# ═══════════════════════════════════════════════════════════
+# 专辑详情 API (/revision/album/v1/simple)
+# ═══════════════════════════════════════════════════════════
+
+def fetch_album_detail(album_id: str, headers: dict | None = None,
+                       proxies: dict | None = None) -> dict:
+    """获取专辑详情（封面、分类、简介、主播等）。
+
+    API: /revision/album/v1/simple?albumId={id}
+    """
+    hdrs = {**DEFAULT_HEADERS, **(headers or {})}
+    try:
+        resp = requests.get(ALBUM_INFO_API, params={"albumId": album_id},
+                            headers=hdrs, timeout=15, proxies=proxies or None)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("ret") != 200:
+            logger.warning(f"专辑详情 API 返回 ret={data.get('ret')} msg={data.get('msg', '')}")
+            return {}
+
+        main_info = data.get("data", {}).get("albumPageMainInfo", {})
+        if not main_info:
+            return {}
+
+        return {
+            "albumId": album_id,
+            "albumTitle": main_info.get("albumTitle", ""),
+            "albumUrl": f"https://www.ximalaya.com/album/{album_id}",
+            "cover": fix_cover_url(main_info.get("cover", "")),
+            "categoryId": main_info.get("categoryId", 0),
+            "categoryTitle": main_info.get("categoryTitle", ""),
+            "anchorUid": main_info.get("anchorUid", 0),
+            "anchorName": main_info.get("anchorName", ""),
+            "intro": strip_html(main_info.get("detailRichIntro", "")),
+            "shortIntro": main_info.get("shortIntro", ""),
+            "recommendReason": main_info.get("recommendReason", ""),
+            "isPaid": main_info.get("isPaid", False),
+            "isFinished": main_info.get("isFinished", 0),
+            "playCount": main_info.get("playCount", 0),
+            "subscribeCount": main_info.get("subscribeCount", 0),
+            "vipType": main_info.get("vipType", 0),
+            "createDate": main_info.get("createDate", ""),
+            "updateDate": main_info.get("updateDate", ""),
+        }
+    except Exception as e:
+        logger.warning(f"获取专辑详情失败 (albumId={album_id}): {e}")
+        return {}
 
 
 # ═══════════════════════════════════════════════════════════

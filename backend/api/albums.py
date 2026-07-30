@@ -11,7 +11,9 @@ from ..services.scrape_service import (
     get_scrape_status,
     stop_scrape,
     scrape_album_tracks,
-    import_album_by_url,
+    start_import_albums,
+    get_import_status,
+    stop_import,
     get_albums,
     get_album_detail,
     get_album_chapters,
@@ -126,22 +128,34 @@ def api_scrape_tracks(book_id: str):
 
 
 # ═══════════════════════════════════════
-# 通过 URL 导入专辑（获取专辑信息 + 章节列表）
+# 通过 URL 导入专辑（批量后台运行 + 状态轮询）
 # ═══════════════════════════════════════
 
-class ImportUrlRequest(BaseModel):
-    url: str
+class ImportUrlsRequest(BaseModel):
+    urls: list[str]
 
 
-@router.post("/albums/import-url")
-def api_import_url(req: ImportUrlRequest):
-    """通过喜马拉雅专辑 URL 导入专辑并获取章节。"""
-    try:
-        result = import_album_by_url(req.url)
-        return result
-    except Exception as e:
-        logger.error(f"URL 导入失败: {e}", exc_info=True)
-        return {"ok": False, "error": str(e)}
+@router.post("/albums/import-urls")
+def api_import_urls(req: ImportUrlsRequest):
+    """批量通过喜马拉雅专辑 URL 导入专辑（后台运行）。"""
+    urls = [u.strip() for u in req.urls if u.strip()]
+    if not urls:
+        return {"ok": False, "error": "URL 列表为空"}
+    ok = start_import_albums(urls)
+    if not ok:
+        return {"ok": False, "error": "已有导入任务正在运行"}
+    return {"ok": True, "total": len(urls), "message": "导入已启动"}
+
+
+@router.get("/albums/import-urls/status")
+def api_import_status():
+    return get_import_status()
+
+
+@router.post("/albums/import-urls/stop")
+def api_import_stop():
+    stopped = stop_import()
+    return {"ok": stopped}
 
 
 # ═══════════════════════════════════════

@@ -208,25 +208,66 @@
 
 <!-- URL 导入模态框 -->
 <div class="modal fade" id="importUrlModal" tabindex="-1">
-    <div class="modal-dialog">
+    <div class="modal-dialog modal-lg">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title">通过 URL 导入专辑</h5>
+                <h5 class="modal-title">通过 URL 批量导入专辑</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
-                <p class="text-muted small mb-2">输入喜马拉雅专辑地址，系统将自动获取专辑信息并入库章节列表。</p>
-                <div class="input-group">
-                    <span class="input-group-text"><i class="bi bi-link-45deg"></i></span>
-                    <input type="text" class="form-control" id="import-url-input"
-                           placeholder="https://www.ximalaya.com/album/77789950">
+                <p class="text-muted small mb-2">输入喜马拉雅专辑地址（每行一个），系统将自动获取专辑信息并入库章节列表。</p>
+                <div class="mb-2">
+                    <textarea class="form-control" id="import-urls-input" rows="6"
+                              placeholder="https://www.ximalaya.com/album/77789950&#10;https://www.ximalaya.com/album/12345678&#10;77789950"></textarea>
                 </div>
-                <div id="import-url-result" class="mt-3" style="display:none"></div>
+                <div class="d-flex align-items-center gap-2 mb-2">
+                    <input type="file" class="form-control form-control-sm" id="import-url-file"
+                           accept=".txt,.csv" style="width: 200px">
+                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadUrlFile()">
+                        <i class="bi bi-upload"></i> 载入文件
+                    </button>
+                    <span class="text-muted small">支持 .txt 文件，每行一个URL</span>
+                </div>
+                <!-- 导入进度面板 -->
+                <div id="import-progress-panel" class="mt-3" style="display:none">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <div>
+                            <span class="spinner-border spinner-border-sm text-primary me-1" id="import-spinner"></span>
+                            <strong id="import-status-text">导入中...</strong>
+                        </div>
+                        <button class="btn btn-sm btn-outline-danger" id="import-stop-btn" onclick="stopImportUrls()">
+                            <i class="bi bi-stop-circle"></i> 停止
+                        </button>
+                    </div>
+                    <div class="row g-2 mb-2">
+                        <div class="col-md-5">
+                            <small class="text-muted d-block">当前</small>
+                            <span id="import-current-url" class="text-truncate d-inline-block" style="max-width: 100%">-</span>
+                        </div>
+                        <div class="col-md-2">
+                            <small class="text-muted d-block">总数</small>
+                            <span id="import-total">0</span>
+                        </div>
+                        <div class="col-md-2">
+                            <small class="text-muted d-block">成功</small>
+                            <span class="text-success" id="import-done">0</span>
+                        </div>
+                        <div class="col-md-2">
+                            <small class="text-muted d-block">失败</small>
+                            <span class="text-danger" id="import-failed">0</span>
+                        </div>
+                    </div>
+                    <div class="progress mb-2" style="height: 4px;">
+                        <div class="progress-bar progress-bar-striped progress-bar-animated" id="import-progress-bar" style="width: 0%"></div>
+                    </div>
+                    <div id="import-log" style="max-height: 200px; overflow-y: auto; font-size: 0.8rem; font-family: monospace; background: #f8f9fa; padding: 8px; border-radius: 4px;">
+                    </div>
+                </div>
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
-                <button type="button" class="btn btn-primary" id="import-url-btn" onclick="doImportUrl()">
-                    <i class="bi bi-box-arrow-in-down"></i> 导入
+                <button type="button" class="btn btn-primary" id="import-urls-btn" onclick="doImportUrls()">
+                    <i class="bi bi-box-arrow-in-down"></i> 开始导入
                 </button>
             </div>
         </div>
@@ -699,54 +740,108 @@ loadCategories().then(() => {
 });
 
 // ═══════════════════════════════════════
-// URL 导入专辑
+// URL 批量导入专辑
 // ═══════════════════════════════════════
 
-async function doImportUrl() {
-    const url = document.getElementById('import-url-input').value.trim();
-    const resultDiv = document.getElementById('import-url-result');
-    const btn = document.getElementById('import-url-btn');
+function loadUrlFile() {
+    const fileInput = document.getElementById('import-url-file');
+    const textarea = document.getElementById('import-urls-input');
+    const file = fileInput.files[0];
+    if (!file) { showToast('请选择文件', 'warning'); return; }
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        const text = e.target.result.trim();
+        const existing = textarea.value.trim();
+        textarea.value = existing ? existing + '\n' + text : text;
+        const count = textarea.value.split('\n').filter(l => l.trim()).length;
+        showToast(`已载入 ${count} 个URL`, 'success');
+    };
+    reader.readAsText(file);
+}
 
-    if (!url) {
-        showToast('请输入专辑 URL', 'warning');
-        return;
-    }
+let importPollTimer = null;
 
+async function doImportUrls() {
+    const text = document.getElementById('import-urls-input').value.trim();
+    if (!text) { showToast('请输入至少一个URL', 'warning'); return; }
+
+    const urls = text.split('\n').map(u => u.trim()).filter(u => u);
+    if (urls.length === 0) { showToast('无有效URL', 'warning'); return; }
+
+    const btn = document.getElementById('import-urls-btn');
     btn.disabled = true;
-    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 导入中...';
-    resultDiv.style.display = 'none';
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 启动中...';
 
     try {
-        const data = await api('/api/albums/import-url', {
+        const data = await api('/api/albums/import-urls', {
             method: 'POST',
-            body: JSON.stringify({ url }),
+            body: JSON.stringify({ urls }),
         });
 
         if (data.ok) {
-            resultDiv.className = 'mt-3 alert alert-success';
-            resultDiv.innerHTML = `
-                <strong>导入成功</strong><br>
-                专辑: ${data.album_title || '-'}<br>
-                章节数: ${data.total_tracks || 0} (入库 ${data.saved_tracks || 0})
-            `;
-            resultDiv.style.display = '';
-            showToast(`导入成功: ${data.total_tracks || 0} 章节`, 'success');
-            loadAlbums(1);
+            document.getElementById('import-progress-panel').style.display = '';
+            btn.innerHTML = '<i class="bi bi-box-arrow-in-down"></i> 导入中';
+            showToast(`开始导入 ${data.total} 个专辑`, 'success');
+            pollImportStatus();
         } else {
-            resultDiv.className = 'mt-3 alert alert-danger';
-            resultDiv.textContent = '导入失败: ' + (data.error || '未知错误');
-            resultDiv.style.display = '';
-            showToast('导入失败: ' + (data.error || ''), 'danger');
+            showToast(data.error || '启动失败', 'danger');
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-box-arrow-in-down"></i> 开始导入';
         }
     } catch (e) {
-        resultDiv.className = 'mt-3 alert alert-danger';
-        resultDiv.textContent = '导入失败: ' + e.message;
-        resultDiv.style.display = '';
-        showToast('导入失败: ' + e.message, 'danger');
-    } finally {
+        showToast('启动失败: ' + e.message, 'danger');
         btn.disabled = false;
-        btn.innerHTML = '<i class="bi bi-box-arrow-in-down"></i> 导入';
+        btn.innerHTML = '<i class="bi bi-box-arrow-in-down"></i> 开始导入';
     }
 }
+
+async function stopImportUrls() {
+    try {
+        await api('/api/albums/import-urls/stop', { method: 'POST' });
+        showToast('正在停止...', 'info');
+    } catch (e) {}
+}
+
+function pollImportStatus() {
+    if (importPollTimer) clearInterval(importPollTimer);
+    importPollTimer = setInterval(async () => {
+        try {
+            const data = await api('/api/albums/import-urls/status');
+            renderImportStatus(data);
+            if (!data.active) {
+                clearInterval(importPollTimer);
+                importPollTimer = null;
+                const btn = document.getElementById('import-urls-btn');
+                btn.disabled = false;
+                btn.innerHTML = '<i class="bi bi-box-arrow-in-down"></i> 开始导入';
+            }
+        } catch (e) {}
+    }, 2000);
+}
+
+function renderImportStatus(data) {
+    document.getElementById('import-status-text').textContent = data.message || data.status;
+    document.getElementById('import-total').textContent = data.total || 0;
+    document.getElementById('import-done').textContent = data.done || 0;
+    document.getElementById('import-failed').textContent = data.failed || 0;
+    document.getElementById('import-current-url').textContent = data.current_url || '-';
+
+    const pct = data.total > 0 ? Math.round(((data.done || 0) + (data.failed || 0)) / data.total * 100) : 0;
+    const bar = document.getElementById('import-progress-bar');
+    bar.style.width = pct + '%';
+
+    const spinner = document.getElementById('import-spinner');
+    if (data.active) {
+        spinner.className = 'spinner-border spinner-border-sm text-primary me-1';
+        spinner.style.display = '';
+    } else {
+        spinner.style.display = 'none';
+    }
+
+    const logDiv = document.getElementById('import-log');
+    logDiv.innerHTML = (data.log || []).map(line => `<div>${line}</div>`).join('');
+    logDiv.scrollTop = logDiv.scrollHeight;
+}
+
 </script>
 {% endblock %}

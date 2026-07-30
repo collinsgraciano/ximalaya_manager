@@ -16,6 +16,7 @@ from pipeline.ximalaya_api import (
     scrape_category as _scrape_category,
     get_all_tracks as _get_all_tracks,
     get_album_info as _get_album_info,
+    fetch_album_detail as _fetch_album_detail,
     normalize_album_record,
     CATEGORIES,
     get_categories as _get_api_categories,
@@ -560,17 +561,8 @@ def _scrape_background(categories: list[str], max_pages: int, sort: str,
             )
 
 
-def import_album_by_url(url: str) -> dict:
-    """通过喜马拉雅专辑 URL 导入专辑：获取专辑信息入库 + 获取章节列表。
-
-    支持的 URL 格式:
-      https://www.ximalaya.com/album/77789950
-      https://www.ximalaya.com/album/77789950/
-      纯数字 albumId: 77789950
-
-    返回:
-        {"ok": True, "book_id": ..., "album_title": ..., "total_tracks": ..., "saved_tracks": ...}
-    """
+def _import_single_album(url: str, headers: dict, proxies: dict | None) -> dict:
+    """导入单个专辑：获取详情入库 + 获取章节列表。返回结果 dict。"""
     import re
 
     # 从 URL 提取 albumId
@@ -580,42 +572,196 @@ def import_album_by_url(url: str) -> dict:
     elif url.strip().isdigit():
         album_id = url.strip()
     else:
-        return {"ok": False, "error": f"无法从 URL 解析专辑 ID: {url}"}
+        return {"ok": False, "error": f"无法解析专辑 ID: {url}"}
 
     book_id = f"xm_{album_id}"
 
-    cookie = get_xm_cookie()
-    headers = _build_headers(cookie)
-    _, proxies = _init_proxy_pool()
+    # 获取专辑详情（封面、分类、简介等）
+    detail = _fetch_album_detail(album_id, headers, proxies=proxies or None)
 
-    # 获取专辑信息
-    album_info = _get_album_info(album_id, headers, proxies=proxies or None)
-    if not album_info:
-        return {"ok": False, "error": f"无法获取专辑信息 (albumId={album_id})"}
+    if detail:
+        album_title = detail.get("albumTitle", f"xm_{album_id}")
+        category = detail.get("categoryTitle", "")
+        author = detail.get("anchorName", "")
+        total_chapters = int(detail.get("totalCount", 0))
+        book_data = {
+            "albumId": album_id,
+            "albumUrl": f"https://www.ximalaya.com/album/{album_id}",
+            "albumCover": detail.get("cover", ""),
+            "intro": detail.get("intro", ""),
+            "shortIntro": detail.get("shortIntro", ""),
+            "albumPlayCount": detail.get("playCount", 0),
+            "subscribeCount": detail.get("subscribeCount", 0),
+            "isPaid": detail.get("isPaid", False),
+            "isFinished": detail.get("isFinished", 0),
+            "anchorId": detail.get("anchorUid", 0),
+            "anchorName": detail.get("anchorName", ""),
+            "vipType": detail.get("vipType", 0),
+            "categoryTitle": category,
+            "categoryId": detail.get("categoryId", 0),
+        }
+    else:
+        # 详情 API 失败，回退到 track API
+        album_info = _get_album_info(album_id, headers, proxies=proxies or None)
+        if not album_info:
+            return {"ok": False, "error": f"无法获取专辑信息 (albumId={album_id})"}
+        album_title = album_info.get("albumTitle", f"xm_{album_id}")
+        total_chapters = int(album_info.get("totalCount", 0))
+        category = ""
+        author = ""
+        book_data = {
+            "albumId": album_id,
+            "albumUrl": f"https://www.ximalaya.com/album/{album_id}",
+        }
 
-    album_title = album_info.get("albumTitle", f"xm_{album_id}")
-    total_chapters = int(album_info.get("totalCount", 0))
-
-    # 入库 books 表（不存在则插入，存在则更新名称）
-    book_data = {
-        "albumId": album_id,
-        "albumUrl": f"https://www.ximalaya.com/album/{album_id}",
-    }
     execute(
         sql.SQL("""
-            INSERT INTO public.books (book_id, book_name, category, total_chapters, book_data, book_status, updated_at)
-            VALUES (%s, %s, '', %s, %s, 'pending', now())
+            INSERT INTO public.books (book_id, book_name, author, category, total_chapters, book_data, book_status, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, 'pending', now())
             ON CONFLICT (book_id) DO UPDATE SET
                 book_name = EXCLUDED.book_name,
+                author = EXCLUDED.author,
+                category = EXCLUDED.category,
                 total_chapters = EXCLUDED.total_chapters,
+                book_data = EXCLUDED.book_data,
                 updated_at = now()
         """),
-        (book_id, album_title, total_chapters, Jsonb(book_data)),
+        (book_id, album_title, author, category, total_chapters, Jsonb(book_data)),
     )
 
     # 获取章节列表并入库
     result = scrape_album_tracks(book_id, proxies=proxies or None)
+    result["book_id"] = book_id
+    result["album_title"] = album_title
     return result
+
+
+# ═══════════════════════════════════════════════════════════
+# 批量 URL 导入（后台线程）
+# ═══════════════════════════════════════════════════════════
+
+_import_state: dict = {
+    "active": False,
+    "status": "idle",
+    "total": 0,
+    "done": 0,
+    "failed": 0,
+    "current_url": "",
+    "message": "",
+    "log": [],
+    "started_at": "",
+    "finished_at": "",
+}
+_import_lock = threading.Lock()
+_import_stop_flag = threading.Event()
+
+
+def get_import_status() -> dict:
+    with _import_lock:
+        return dict(_import_state)
+
+
+def stop_import() -> bool:
+    with _import_lock:
+        if not _import_state["active"]:
+            return False
+        _import_stop_flag.set()
+        _import_state["message"] = "正在停止..."
+        return True
+
+
+def start_import_albums(urls: list[str]) -> bool:
+    """启动批量 URL 导入后台任务。"""
+    with _import_lock:
+        if _import_state["active"]:
+            return False
+        _import_stop_flag.clear()
+        _import_state.update({
+            "active": True,
+            "status": "running",
+            "total": len(urls),
+            "done": 0,
+            "failed": 0,
+            "current_url": "",
+            "message": "开始导入",
+            "log": [],
+            "started_at": datetime.now().strftime("%H:%M:%S"),
+            "finished_at": "",
+        })
+
+    thread = threading.Thread(target=_import_background, args=(urls,), daemon=True)
+    thread.start()
+    return True
+
+
+def _import_background(urls: list[str]):
+    """后台批量导入线程。"""
+    cookie = get_xm_cookie()
+    headers = _build_headers(cookie)
+    proxy_enabled, _ = _init_proxy_pool()
+
+    def _log(msg: str):
+        ts = datetime.now().strftime("%H:%M:%S")
+        with _import_lock:
+            _import_state["log"].append(f"[{ts}] {msg}")
+            _import_state["log"] = _import_state["log"][-100:]
+
+    try:
+        total = len(urls)
+        _log(f"共 {total} 个专辑待导入")
+        done = 0
+        failed = 0
+
+        for idx, url in enumerate(urls):
+            if _import_stop_flag.is_set():
+                _log("用户手动停止")
+                break
+
+            url = url.strip()
+            if not url:
+                continue
+
+            with _import_lock:
+                _import_state["current_url"] = url
+                _import_state["message"] = f"正在导入 ({idx + 1}/{total})"
+            _log(f"[{idx + 1}/{total}] {url}")
+
+            # 每次导入换一个代理
+            proxies = get_random_proxy() if proxy_enabled else None
+
+            try:
+                result = _import_single_album(url, headers, proxies or None)
+                if result.get("ok"):
+                    done += 1
+                    title = result.get("album_title", "")
+                    tracks = result.get("total_tracks", 0)
+                    _log(f"  成功: {title} ({tracks} 集)")
+                else:
+                    failed += 1
+                    err = result.get("error", "未知错误")
+                    _log(f"  失败: {err}")
+            except Exception as e:
+                failed += 1
+                _log(f"  异常: {e}")
+
+            with _import_lock:
+                _import_state["done"] = done
+                _import_state["failed"] = failed
+
+        with _import_lock:
+            _import_state["status"] = "stopped" if _import_stop_flag.is_set() else "done"
+            _import_state["active"] = False
+            _import_state["message"] = "已停止" if _import_stop_flag.is_set() else "导入完成"
+            _import_state["finished_at"] = datetime.now().strftime("%H:%M:%S")
+            _log(f"完成: 成功 {done}, 失败 {failed}")
+
+    except Exception as e:
+        logger.error(f"批量导入异常: {e}", exc_info=True)
+        with _import_lock:
+            _import_state["status"] = "error"
+            _import_state["active"] = False
+            _import_state["message"] = f"错误: {e}"
+            _import_state["finished_at"] = datetime.now().strftime("%H:%M:%S")
 
 
 def scrape_album_tracks(book_id: str, proxies: dict | None = None) -> dict:
