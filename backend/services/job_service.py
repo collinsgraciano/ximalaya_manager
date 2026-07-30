@@ -16,12 +16,49 @@ STALE_JOB_HEARTBEAT_SECONDS = 90
 STALE_JOB_FALLBACK_MINUTES = 60
 
 
+def _ensure_chapters(book_id: str) -> bool:
+    """确保专辑已获取全部章节列表。如果章节不全则自动获取。
+
+    返回 True 表示已有完整章节（或刚获取成功），False 表示获取失败。
+    """
+    # 延迟导入避免循环依赖
+    from .scrape_service import scrape_album_tracks
+
+    book = fetch_one(
+        "SELECT total_chapters FROM public.books WHERE book_id = %s",
+        (book_id,),
+    )
+    if not book:
+        return False
+
+    expected = int(book.get("total_chapters") or 0)
+
+    chapter_row = fetch_one(
+        "SELECT COUNT(*) as cnt FROM public.audiobook_chapters WHERE book_id = %s",
+        (book_id,),
+    )
+    actual = int((chapter_row or {}).get("cnt", 0))
+
+    # 已有章节且数量匹配（或 books.total_chapters 为 0 但已有章节记录）
+    if actual > 0 and (expected == 0 or actual >= expected):
+        return True
+
+    # 章节不全 → 获取章节列表
+    logger.info(f"专辑 {book_id} 章节不全 (DB:{actual}/{expected or '?'}), 自动获取...")
+    try:
+        result = scrape_album_tracks(book_id)
+        return bool(result.get("ok"))
+    except Exception as e:
+        logger.error(f"自动获取章节失败 {book_id}: {e}")
+        return False
+
+
 # ═══════════════════════════════════════════════════════════
 # 创建任务
 # ═══════════════════════════════════════════════════════════
 
 def create_job(book_id: str, job_type: str = "process_album") -> dict | None:
-    """为专辑创建处理任务。"""
+    """为专辑创建任务。如果专辑未获取章节则自动获取。"""
     # 获取专辑信息
     book = fetch_one(
         "SELECT book_id, book_name, total_chapters FROM public.books WHERE book_id = %s",
@@ -30,7 +67,11 @@ def create_job(book_id: str, job_type: str = "process_album") -> dict | None:
     if not book:
         return None
 
-    # 获取章节数
+    # 确保已获取全部章节
+    if not _ensure_chapters(book_id):
+        return None
+
+    # 获取待处理章节数
     chapter_count = fetch_one(
         "SELECT COUNT(*) as cnt FROM public.audiobook_chapters WHERE book_id = %s AND upload_status = 'pending'",
         (book_id,),
@@ -60,36 +101,25 @@ def create_jobs_batch(book_ids: list[str]) -> list[dict]:
 
 
 def create_jobs_for_all_pending(categories: list[str] | None = None) -> list[dict]:
-    """为未完成、不在任务队列且已获取章节的专辑创建任务。
+    """为未完成、不在任务队列的专辑创建任务。
+
+    如果专辑未获取章节或章节不全，会自动先获取章节列表再创建任务。
 
     Args:
         categories: 可选分类列表，仅在这些分类中筛选。None=所有分类。
     """
-    # 筛选条件：
-    # 1. book_status != 'success'（未完成）
-    # 2. 已有章节记录（已获取章节信息）
-    # 3. 有 pending 章节
-    # 4. 没有 pending/processing 任务（不在任务队列）
-    # 5. 可选：限定分类
     cat_clause = sql.SQL("")
     params: list = []
     if categories:
         cat_clause = sql.SQL(" AND b.category = ANY(%s)")
         params.append(categories)
 
+    # 查找未完成、不在任务队列的专辑（不要求已有章节）
     rows = fetch_all(
         sql.SQL("""
             SELECT DISTINCT b.book_id
             FROM public.books b
             WHERE b.book_status != 'success'
-              AND EXISTS (
-                  SELECT 1 FROM public.audiobook_chapters c
-                  WHERE c.book_id = b.book_id
-              )
-              AND EXISTS (
-                  SELECT 1 FROM public.audiobook_chapters c
-                  WHERE c.book_id = b.book_id AND c.upload_status = 'pending'
-              )
               AND NOT EXISTS (
                   SELECT 1 FROM public.xm_jobs j
                   WHERE j.book_id = b.book_id
@@ -103,6 +133,7 @@ def create_jobs_for_all_pending(categories: list[str] | None = None) -> list[dic
 
     results = []
     for row in (rows or []):
+        # create_job 内部会调用 _ensure_chapters 自动获取缺失章节
         job = create_job(row["book_id"])
         if job:
             results.append(job)
