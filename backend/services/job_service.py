@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
@@ -19,10 +20,10 @@ STALE_JOB_FALLBACK_MINUTES = 60
 def _ensure_chapters(book_id: str) -> bool:
     """确保专辑已获取全部章节列表。如果章节不全则自动获取。
 
-    返回 True 表示已有完整章节（或刚获取成功），False 表示获取失败。
+    使用随机代理获取章节，返回 True 表示已有完整章节（或刚获取成功），False 表示获取失败。
     """
     # 延迟导入避免循环依赖
-    from .scrape_service import scrape_album_tracks
+    from .scrape_service import scrape_album_tracks, _init_proxy_pool, get_random_proxy
 
     book = fetch_one(
         "SELECT total_chapters FROM public.books WHERE book_id = %s",
@@ -43,10 +44,12 @@ def _ensure_chapters(book_id: str) -> bool:
     if actual > 0 and (expected == 0 or actual >= expected):
         return True
 
-    # 章节不全 → 获取章节列表
-    logger.info(f"专辑 {book_id} 章节不全 (DB:{actual}/{expected or '?'}), 自动获取...")
+    # 章节不全 → 随机选代理获取章节列表
+    proxy_enabled, _ = _init_proxy_pool()
+    proxies = get_random_proxy() if proxy_enabled else None
+    logger.info(f"专辑 {book_id} 章节不全 (DB:{actual}/{expected or '?'}), 自动获取...{f' [代理]' if proxies else ' [直连]'}")
     try:
-        result = scrape_album_tracks(book_id)
+        result = scrape_album_tracks(book_id, proxies=proxies or None)
         return bool(result.get("ok"))
     except Exception as e:
         logger.error(f"自动获取章节失败 {book_id}: {e}")
@@ -100,13 +103,15 @@ def create_jobs_batch(book_ids: list[str]) -> list[dict]:
     return results
 
 
-def create_jobs_for_all_pending(categories: list[str] | None = None) -> list[dict]:
-    """为未完成、不在任务队列的专辑创建任务。
+def create_jobs_for_all_pending(categories: list[str] | None = None,
+                                max_workers: int = 5) -> list[dict]:
+    """为未完成、不在任务队列的专辑创建任务（多线程）。
 
-    如果专辑未获取章节或章节不全，会自动先获取章节列表再创建任务。
+    如果专辑未获取章节或章节不全，会自动先获取章节列表（每个线程随机选代理）再创建任务。
 
     Args:
         categories: 可选分类列表，仅在这些分类中筛选。None=所有分类。
+        max_workers: 最大并发线程数。
     """
     cat_clause = sql.SQL("")
     params: list = []
@@ -131,13 +136,32 @@ def create_jobs_for_all_pending(categories: list[str] | None = None) -> list[dic
         tuple(params) if params else None,
     )
 
-    results = []
-    for row in (rows or []):
-        # create_job 内部会调用 _ensure_chapters 自动获取缺失章节
-        job = create_job(row["book_id"])
-        if job:
-            results.append(job)
+    if not rows:
+        return []
 
+    book_ids = [row["book_id"] for row in rows]
+    total = len(book_ids)
+    results: list[dict] = []
+    done_count = 0
+
+    worker_count = max(1, min(max_workers, total))
+    logger.info(f"批量创建任务: {total} 个专辑, {worker_count} 线程并发")
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {executor.submit(create_job, bid): bid for bid in book_ids}
+        for future in as_completed(futures):
+            bid = futures[future]
+            try:
+                job = future.result()
+                if job:
+                    results.append(job)
+            except Exception as e:
+                logger.error(f"创建任务失败 {bid}: {e}")
+            done_count += 1
+            if done_count % 10 == 0 or done_count == total:
+                logger.info(f"批量创建进度: {done_count}/{total}, 已创建 {len(results)} 个任务")
+
+    logger.info(f"批量创建完成: {len(results)}/{total} 个任务创建成功")
     return results
 
 

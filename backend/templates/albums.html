@@ -289,7 +289,7 @@
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
-                <p class="text-muted small mb-2">筛选条件：未完成、不在任务队列、已获取章节且有 pending 章节的专辑</p>
+                <p class="text-muted small mb-2">筛选条件：未完成、不在任务队列的专辑。未获取章节的会自动获取（多线程）。</p>
                 <div class="mb-3">
                     <div class="d-flex justify-content-between align-items-center mb-2">
                         <label class="form-label mb-0">选择分类（可多选，不选=全部分类）</label>
@@ -300,6 +300,11 @@
                     </div>
                     <div class="row g-2" id="job-categories-list" style="max-height: 250px; overflow-y: auto;">
                     </div>
+                </div>
+                <div class="d-flex align-items-center gap-2">
+                    <label class="form-label small mb-0">并发线程</label>
+                    <input type="number" class="form-control form-control-sm" id="create-jobs-workers-input" value="5" min="1" max="20" style="width: 80px">
+                    <span class="text-muted small">（获取章节时的并发数）</span>
                 </div>
             </div>
             <div class="modal-footer">
@@ -599,10 +604,12 @@ async function deleteAlbum(bookId) {
 
 async function doCreateAllJobs() {
     const categories = Array.from(document.querySelectorAll('.job-cat-checkbox:checked')).map(cb => cb.value);
+    const maxWorkers = parseInt(document.getElementById('create-jobs-workers-input')?.value) || 5;
     const catLabel = categories.length > 0 ? `（${categories.length} 个分类）` : '（全部分类）';
-    if (!confirm(`确认为符合条件的专辑创建任务？${catLabel}`)) return;
+    if (!confirm(`确认为符合条件的专辑创建任务？${catLabel}\n并发线程: ${maxWorkers}`)) return;
     try {
-        const body = categories.length > 0 ? { categories } : {};
+        const body = { max_workers: maxWorkers };
+        if (categories.length > 0) body.categories = categories;
         const data = await api('/api/albums/create-all-jobs', {
             method: 'POST',
             body: JSON.stringify(body),

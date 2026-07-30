@@ -323,13 +323,15 @@ def api_scrape_all_tracks_stop():
 
 class CreateAllJobsRequest(BaseModel):
     categories: list[str] | None = None
+    max_workers: int = 5
 
 
 @router.post("/albums/create-all-jobs")
 def api_create_all_jobs(req: CreateAllJobsRequest | None = None):
     from ..services.job_service import create_jobs_for_all_pending
     categories = req.categories if req else None
-    jobs = create_jobs_for_all_pending(categories)
+    max_workers = req.max_workers if req else 5
+    jobs = create_jobs_for_all_pending(categories, max_workers=max_workers)
     return {"ok": True, "count": len(jobs), "jobs": jobs}
 
 
