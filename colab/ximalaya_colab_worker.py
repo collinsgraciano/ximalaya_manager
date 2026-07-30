@@ -34,17 +34,29 @@ import tempfile
 import logging
 import argparse
 import threading
+import warnings
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    tqdm = None
 
 # 修复 Windows/Colab 控制台编码
 if hasattr(sys, 'stdout'):
-    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8', errors='replace')
+
+warnings.filterwarnings("ignore", category=SyntaxWarning)
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    format="%(asctime)s [%(levelname)s] [%(threadName)s] %(message)s",
     datefmt="%H:%M:%S",
+    stream=sys.stdout,
+    force=True,
 )
 logger = logging.getLogger("colab_worker")
 
@@ -54,26 +66,26 @@ logger = logging.getLogger("colab_worker")
 
 def ensure_deps():
     """安装缺失的依赖。"""
+    deps = []
     try:
         from Crypto.Cipher import AES
     except ImportError:
-        logger.info("安装 pycryptodome...")
-        import subprocess
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "pycryptodome"])
+        deps.append("pycryptodome")
 
     try:
         from tqdm import tqdm
     except ImportError:
-        logger.info("安装 tqdm...")
-        import subprocess
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "tqdm"])
+        deps.append("tqdm")
 
     try:
         from pydub import AudioSegment
     except ImportError:
-        logger.info("安装 pydub...")
+        deps.append("pydub")
+
+    if deps:
+        logger.info(f"安装依赖: {', '.join(deps)}")
         import subprocess
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "pydub"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q"] + deps)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -83,12 +95,15 @@ def ensure_deps():
 class ColabWorker:
     """Colab Worker 客户端。"""
 
-    def __init__(self, vps_url: str, worker_id: str, worker_token: str):
+    def __init__(self, vps_url: str, worker_id: str, worker_token: str,
+                 num_workers: int = 1):
         self.vps_url = vps_url.rstrip("/")
         self.worker_id = worker_id
         self.worker_token = worker_token
+        self.num_workers = max(1, num_workers)
         self.config: dict = {}
         self._heartbeat_stop = threading.Event()
+        self._counter_lock = threading.Lock()
 
     # ─── HTTP 工具 ───
 
@@ -464,6 +479,56 @@ class ColabWorker:
         except Exception as e:
             logger.warning(f"释放任务失败: {e}")
 
+    # ─── 多线程并行处理章节 ───
+
+    def process_chapters_parallel(self, job_id: int, chapters: list,
+                                  book_id: str) -> tuple[int, int]:
+        """多线程并行处理同一任务内的多个章节。"""
+        total = len(chapters)
+        num_threads = min(self.num_workers, total)
+        logger.info(f"  启动 {num_threads} 个线程并行处理 {total} 个章节")
+
+        success_count = 0
+        fail_count = 0
+        pbar = tqdm(total=total, desc=f"Job #{job_id}", unit="ch") if tqdm else None
+
+        def _process_one(idx: int, chapter: dict) -> tuple[dict, dict]:
+            thread_name = threading.current_thread().name
+            ch_name = chapter.get('chapter_name', '')[:30]
+            logger.info(f"  [{idx+1}/{total}] {ch_name} ({thread_name})")
+            result = self.process_chapter(job_id, chapter, book_id)
+            return chapter, result
+
+        with ThreadPoolExecutor(max_workers=num_threads, thread_name_prefix="worker") as executor:
+            futures = {
+                executor.submit(_process_one, i, ch): (i, ch)
+                for i, ch in enumerate(chapters)
+            }
+
+            for future in as_completed(futures):
+                try:
+                    chapter, result = future.result()
+                    with self._counter_lock:
+                        if (chapter.get("upload_status") == "uploaded" or
+                           (result and result.get("upload_status") == "uploaded")):
+                            success_count += 1
+                        else:
+                            fail_count += 1
+                        if pbar:
+                            pbar.set_postfix_str(f"OK={success_count} FAIL={fail_count}")
+                except Exception as e:
+                    logger.error(f"  线程异常: {e}", exc_info=True)
+                    with self._counter_lock:
+                        fail_count += 1
+                        if pbar:
+                            pbar.set_postfix_str(f"OK={success_count} FAIL={fail_count}")
+                if pbar:
+                    pbar.update(1)
+
+        if pbar:
+            pbar.close()
+        return success_count, fail_count
+
     # ─── 主循环 ───
 
     def run(self, poll_interval: int = 10, max_jobs: int = 0):
@@ -475,6 +540,8 @@ class ColabWorker:
         """
         logger.info(f"Colab Worker 启动: {self.worker_id}")
         logger.info(f"VPS: {self.vps_url}")
+        if self.num_workers > 1:
+            logger.info(f"多线程模式: {self.num_workers} 线程 (CPU核心: {os.cpu_count()})")
 
         # 获取配置
         self.fetch_config()
@@ -513,18 +580,32 @@ class ColabWorker:
                 # 刷新配置（确保最新 TG token 等）
                 self.fetch_config()
 
-                success_count = 0
-                fail_count = 0
-
-                for i, chapter in enumerate(chapters):
-                    logger.info(f"  [{i+1}/{total}] {chapter.get('chapter_name', '')}")
-
-                    result = self.process_chapter(job_id, chapter, book_id)
-
-                    if chapter.get("upload_status") == "uploaded" or (result and result.get("upload_status") == "uploaded"):
-                        success_count += 1
-                    else:
-                        fail_count += 1
+                if self.num_workers > 1:
+                    # 多线程并行处理
+                    success_count, fail_count = self.process_chapters_parallel(
+                        job_id, chapters, book_id
+                    )
+                else:
+                    # 单线程串行处理
+                    success_count = 0
+                    fail_count = 0
+                    pbar = tqdm(chapters, desc=f"Job #{job_id}", unit="ch") if tqdm else None
+                    for i, chapter in enumerate(chapters or []):
+                        ch_name = chapter.get('chapter_name', '')[:30]
+                        if pbar:
+                            pbar.set_postfix_str(ch_name)
+                        else:
+                            logger.info(f"  [{i+1}/{total}] {ch_name}")
+                        result = self.process_chapter(job_id, chapter, book_id)
+                        if (chapter.get("upload_status") == "uploaded" or
+                           (result and result.get("upload_status") == "uploaded")):
+                            success_count += 1
+                        else:
+                            fail_count += 1
+                        if pbar:
+                            pbar.set_postfix_str(f"OK={success_count} FAIL={fail_count}")
+                    if pbar:
+                        pbar.close()
 
                 # 标记任务完成
                 if fail_count == 0:
@@ -555,6 +636,7 @@ def main():
     parser.add_argument("--worker-token", required=True, help="Worker 认证 Token")
     parser.add_argument("--poll-interval", type=int, default=10, help="无任务时等待秒数")
     parser.add_argument("--max-jobs", type=int, default=0, help="最大处理任务数 (0=不限)")
+    parser.add_argument("--num-workers", type=int, default=1, help="并行线程数 (1=单线程, >1=多线程, 默认1)")
     parser.add_argument("--install-deps", action="store_true", help="自动安装依赖")
     args = parser.parse_args()
 
@@ -579,6 +661,7 @@ def main():
         vps_url=args.vps_url,
         worker_id=worker_id,
         worker_token=args.worker_token,
+        num_workers=args.num_workers,
     )
     worker.run(poll_interval=args.poll_interval, max_jobs=args.max_jobs)
 
