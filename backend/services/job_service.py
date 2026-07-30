@@ -165,6 +165,14 @@ def claim_job(worker_id: str) -> dict | None:
     reclaimed = False
 
     if not job:
+        # 检查该 worker 是否已有 processing 任务（防止同时认领多个任务）
+        existing = fetch_one(
+            sql.SQL("SELECT 1 FROM public.xm_jobs WHERE worker_id = %s AND status = 'processing' LIMIT 1"),
+            (worker_id,),
+        )
+        if existing:
+            return None
+
         # 认领新的 pending 任务（无重试次数限制）
         job = execute_returning(
             sql.SQL("""
