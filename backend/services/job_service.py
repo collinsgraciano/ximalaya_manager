@@ -208,6 +208,21 @@ def claim_job(worker_id: str) -> dict | None:
         (book_id,),
     )
 
+    # 如果没有 pending 章节但 books.total_chapters > 0，说明章节未入库
+    if not chapters:
+        total_chapters = fetch_val(
+            "SELECT COALESCE(total_chapters, 0) FROM public.books WHERE book_id = %s",
+            (book_id,),
+        )
+        total_chapters = int(total_chapters or 0)
+        if total_chapters > 0:
+            # 章节未采集，放弃任务
+            execute(
+                sql.SQL("UPDATE public.xm_jobs SET status = 'pending', worker_id = NULL, claimed_at = NULL WHERE job_id = %s"),
+                (job["job_id"],),
+            )
+            return None
+
     # 认领章节（标记 worker_id + claimed_at）
     if chapters:
         execute(
