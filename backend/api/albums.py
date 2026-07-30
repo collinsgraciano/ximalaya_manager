@@ -15,6 +15,7 @@ from ..services.scrape_service import (
     get_import_status,
     stop_import,
     get_albums,
+    get_album_category_stats,
     get_album_detail,
     get_album_chapters,
     delete_album,
@@ -36,6 +37,12 @@ router = APIRouter(prefix="/api", tags=["albums"])
 @router.get("/categories")
 def api_categories():
     return {"categories": get_categories()}
+
+
+@router.get("/albums/category-stats")
+def api_album_category_stats():
+    """获取各分类的专辑数量统计。"""
+    return {"stats": get_album_category_stats()}
 
 
 # ═══════════════════════════════════════

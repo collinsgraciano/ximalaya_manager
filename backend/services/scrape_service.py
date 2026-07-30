@@ -895,6 +895,20 @@ def get_albums(page: int = 1, page_size: int = 20, category: str = "",
     }
 
 
+def get_album_category_stats() -> list[dict]:
+    """获取各分类的专辑数量统计。"""
+    rows = fetch_all(
+        sql.SQL("""
+            SELECT category, COUNT(*) as cnt
+            FROM public.books
+            WHERE category IS NOT NULL AND category != ''
+            GROUP BY category
+            ORDER BY cnt DESC
+        """),
+    )
+    return rows or []
+
+
 def get_album_detail(book_id: str) -> dict | None:
     """获取专辑详情。"""
     return fetch_one(

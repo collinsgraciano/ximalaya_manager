@@ -137,6 +137,12 @@
     </div>
 </div>
 
+<!-- 分类统计 -->
+<div class="card p-2 mb-3" id="category-stats-card" style="display:none">
+    <div class="d-flex flex-wrap gap-1 align-items-center" id="category-stats-bar">
+    </div>
+</div>
+
 <div class="card p-3">
     <div class="table-responsive">
         <table class="table table-sm table-hover">
@@ -737,7 +743,52 @@ loadCategories().then(() => {
     loadAlbums(1);
     checkScrapeStatus();
     checkTracksStatus();
+    loadCategoryStats();
 });
+
+// ═══════════════════════════════════════
+// 分类统计
+// ═══════════════════════════════════════
+
+const categoryNamesMap = {};
+
+async function loadCategoryStats() {
+    try {
+        const [statsResp, catsResp] = await Promise.all([
+            api('/api/albums/category-stats'),
+            api('/api/categories'),
+        ]);
+        const cats = catsResp.categories || {};
+        Object.assign(categoryNamesMap, cats);
+
+        const stats = statsResp.stats || [];
+        if (!stats.length) return;
+
+        const bar = document.getElementById('category-stats-bar');
+        bar.innerHTML = '';
+        let total = 0;
+        for (const s of stats) {
+            total += parseInt(s.cnt || 0);
+            const name = cats[s.category] || s.category || '未分类';
+            const badge = document.createElement('span');
+            badge.className = 'badge bg-light text-dark border rounded-pill';
+            badge.style.cursor = 'pointer';
+            badge.innerHTML = `${name} <span class="badge bg-primary ms-1">${s.cnt}</span>`;
+            badge.onclick = () => {
+                document.getElementById('filter-category').value = s.category;
+                loadAlbums(1);
+            };
+            bar.appendChild(badge);
+        }
+        const totalBadge = document.createElement('span');
+        totalBadge.className = 'badge bg-secondary rounded-pill ms-auto';
+        totalBadge.textContent = `共 ${total} 个专辑`;
+        bar.appendChild(totalBadge);
+        document.getElementById('category-stats-card').style.display = '';
+    } catch (e) {
+        console.error('加载分类统计失败:', e);
+    }
+}
 
 // ═══════════════════════════════════════
 // URL 批量导入专辑
