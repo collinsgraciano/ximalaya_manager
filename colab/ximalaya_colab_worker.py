@@ -281,7 +281,8 @@ class ColabWorker:
             status, file_size = "no_url", 0
             for dl_attempt in range(download_retries):
                 status, file_size = download_track(track_id, audio_path, headers=headers,
-                                                    proxies=proxies, quality_priority=quality_priority)
+                                                    proxies=proxies, quality_priority=quality_priority,
+                                                    max_retries=1)
                 if status in ("downloaded", "skipped"):
                     break
                 # 下载失败: 踢出当前代理, 换一个重试

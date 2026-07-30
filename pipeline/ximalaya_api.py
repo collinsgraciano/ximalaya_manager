@@ -600,7 +600,7 @@ def get_download_url(track_id: str, headers: dict | None = None,
             resp = requests.get(
                 f"{BASE_URL}/mobile-playpage/track/v3/baseInfo/{ts}",
                 params={"device": "web", "trackId": str(track_id), "trackQualityLevel": "3"},
-                headers=hdrs, timeout=15, proxies=proxies or None)
+                headers=hdrs, timeout=10, proxies=proxies or None)
             data = resp.json()
 
             if data.get("ret") != 0:
@@ -661,7 +661,7 @@ def download_track(track_id: str, save_path: str, headers: dict | None = None,
 
     for attempt in range(max_retries):
         try:
-            resp = requests.get(download_url, headers=hdrs, stream=True, timeout=120, proxies=proxies or None)
+            resp = requests.get(download_url, headers=hdrs, stream=True, timeout=30, proxies=proxies or None)
             resp.raise_for_status()
 
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
