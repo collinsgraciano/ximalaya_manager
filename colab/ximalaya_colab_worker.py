@@ -193,6 +193,38 @@ class ColabWorker:
             stats = pool.health_check()
             logger.info(f"代理池初始化: {stats['alive']}/{stats['total']} 可用")
 
+    # ─── 代理池补充 ───
+
+    def _refill_proxy_pool(self, pool) -> dict | None:
+        """代理池空时从 PROXY_LIST_URL 自动获取新代理补充。"""
+        list_url = self.config.get("proxy_list_url", "")
+        if not list_url:
+            logger.warning("代理池空且未配置 PROXY_LIST_URL, 无法补充")
+            return None
+
+        verify_country = self.config.get("proxy_verify_country", "中国")
+        max_tests = int(self.config.get("proxy_max_tests", 100))
+        timeout = int(self.config.get("proxy_timeout", 10))
+
+        logger.info(f"代理池已空, 从 URL 自动获取新代理: {list_url}")
+        from pipeline.proxy_pool import auto_discover_proxies
+        new_proxies = auto_discover_proxies(
+            list_url=list_url,
+            verify_country=verify_country,
+            max_tests=max_tests,
+            timeout=min(timeout, 5),
+        )
+
+        if not new_proxies:
+            logger.warning("自动获取代理失败, 无新代理可用")
+            return None
+
+        added = pool.add_proxies(new_proxies)
+        logger.info(f"代理池补充完成: 新增 {added} 个可用代理")
+        if added > 0:
+            return pool.get()
+        return None
+
     # ─── 任务认领 ───
 
     def claim_job(self) -> dict | None:
@@ -244,14 +276,31 @@ class ColabWorker:
             # 音质优先级
             quality_priority = parse_quality_priority(self.config.get("audio_quality"))
 
-            status, file_size = download_track(track_id, audio_path, headers=headers,
-                                                proxies=proxies, quality_priority=quality_priority)
-            if status not in ("downloaded", "skipped"):
-                # 下载失败时标记代理不可用
+            # 下载: 代理失败时换代理重试 (最多 3 次)
+            download_retries = 3
+            status, file_size = "no_url", 0
+            for dl_attempt in range(download_retries):
+                status, file_size = download_track(track_id, audio_path, headers=headers,
+                                                    proxies=proxies, quality_priority=quality_priority)
+                if status in ("downloaded", "skipped"):
+                    break
+                # 下载失败: 踢出当前代理, 换一个重试
                 if pool and proxies:
                     proxy_url = proxies.get("http") or proxies.get("https")
                     if proxy_url:
                         pool.mark_dead(proxy_url)
+                    proxies = pool.get() or None
+                    if not proxies:
+                        # 代理池空了, 自动补充
+                        proxies = self._refill_proxy_pool(pool) or None
+                    if proxies:
+                        logger.info(f"  下载失败, 换代理重试 ({dl_attempt+1}/{download_retries})")
+                    else:
+                        logger.warning(f"  下载失败且无可用代理")
+                if dl_attempt < download_retries - 1:
+                    time.sleep(2)
+
+            if status not in ("downloaded", "skipped"):
                 return self._report_chapter(job_id, chapter_id, "pending", error_message=f"下载失败: {status}")
             if status == "skipped" and file_size < 1000:
                 return self._report_chapter(job_id, chapter_id, "pending", error_message="文件太小")

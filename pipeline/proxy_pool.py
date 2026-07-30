@@ -71,6 +71,28 @@ def _fetch_proxy_list_from_url(url: str) -> list[str]:
     return normalized
 
 
+def _fetch_multiple_urls_concurrent(urls: list[str]) -> list[str]:
+    """并发从多个 URL 获取代理列表，合并去重返回。"""
+    all_candidates: list[str] = []
+    seen = set()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(urls), 10)) as executor:
+        future_to_url = {executor.submit(_fetch_proxy_list_from_url, url): url for url in urls}
+        for future in concurrent.futures.as_completed(future_to_url):
+            url = future_to_url[future]
+            try:
+                proxies_from_url = future.result()
+                logger.info(f"从 {url} 获取 {len(proxies_from_url)} 个候选代理")
+                for p in proxies_from_url:
+                    if p not in seen:
+                        seen.add(p)
+                        all_candidates.append(p)
+            except Exception as e:
+                logger.warning(f"获取代理列表失败 ({url}): {e}")
+
+    return all_candidates
+
+
 def auto_discover_proxies(
     list_url: str,
     verify_country: str = "中国",
@@ -96,16 +118,8 @@ def auto_discover_proxies(
         logger.warning("未配置代理列表 URL")
         return []
 
-    # 从所有 URL 获取代理并合并去重
-    all_candidates: list[str] = []
-    seen = set()
-    for url in urls:
-        proxies_from_url = _fetch_proxy_list_from_url(url)
-        logger.info(f"从 {url} 获取 {len(proxies_from_url)} 个候选代理")
-        for p in proxies_from_url:
-            if p not in seen:
-                seen.add(p)
-                all_candidates.append(p)
+    # 并发从所有 URL 获取代理并合并去重
+    all_candidates = _fetch_multiple_urls_concurrent(urls)
 
     if not all_candidates:
         logger.warning("代理列表为空（所有 URL 获取失败）")
@@ -236,20 +250,35 @@ class ProxyPool:
 
         logger.info(f"代理池新增 {len(truly_new)} 个代理 (去重后), 开始检测...")
 
-        # 只检测新代理
-        added = 0
-        for proxy_url in truly_new:
-            latency, ok = self._measure_latency(proxy_url)
-            if ok:
-                with self._lock:
-                    self._latency_map[proxy_url] = latency
-                    if proxy_url not in self._sorted_proxies:
-                        self._sorted_proxies.append(proxy_url)
-                added += 1
-                logger.info(f"[补充检测] 新代理可用: {proxy_url} (延迟 {latency:.2f}s)")
-            else:
-                # 检测失败 → 踢出（触发 on_dead 回调更新 DB 缓存）
-                self.mark_dead(proxy_url)
+        # 并发检测新代理
+        alive_results: list[tuple[str, float]] = []
+        dead_proxies: list[str] = []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+            futures = {executor.submit(self._measure_latency, p): p for p in truly_new}
+            for future in concurrent.futures.as_completed(futures):
+                proxy_url = futures[future]
+                try:
+                    latency, ok = future.result()
+                except Exception:
+                    latency, ok = 0, False
+                if ok:
+                    alive_results.append((proxy_url, latency))
+                    logger.info(f"[补充检测] 新代理可用: {proxy_url} (延迟 {latency:.2f}s)")
+                else:
+                    dead_proxies.append(proxy_url)
+
+        with self._lock:
+            for proxy_url, latency in alive_results:
+                self._latency_map[proxy_url] = latency
+                if proxy_url not in self._sorted_proxies:
+                    self._sorted_proxies.append(proxy_url)
+
+        # 踢出检测失败的新代理
+        for p in dead_proxies:
+            self.mark_dead(p)
+
+        added = len(alive_results)
 
         # 重新排序
         with self._lock:
@@ -262,7 +291,7 @@ class ProxyPool:
         return added
 
     def health_check(self) -> dict:
-        """检测所有代理的连通性和延迟，按延迟重新排序。
+        """并发检测所有代理的连通性和延迟，按延迟重新排序。
 
         只应在初始化时调用一次。死亡代理直接踢出。
         """
@@ -270,23 +299,33 @@ class ProxyPool:
         if not self._all_proxies:
             return results
 
+        all_proxies = list(self._all_proxies)
+
+        # 并发检测所有代理
+        alive_results: list[tuple[str, float]] = []
         dead_proxies: list[str] = []
 
-        for proxy_url in list(self._all_proxies):
-            latency, ok = self._measure_latency(proxy_url)
-            detail = {"proxy": proxy_url, "latency": latency, "ok": ok}
-            results["details"].append(detail)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+            futures = {executor.submit(self._measure_latency, p): p for p in all_proxies}
+            for future in concurrent.futures.as_completed(futures):
+                proxy_url = futures[future]
+                try:
+                    latency, ok = future.result()
+                except Exception:
+                    latency, ok = 0, False
+                results["details"].append({"proxy": proxy_url, "latency": latency, "ok": ok})
+                if ok:
+                    alive_results.append((proxy_url, latency))
+                    logger.info(f"[健康检测] 代理可用: {proxy_url} (延迟 {latency:.2f}s)")
+                else:
+                    dead_proxies.append(proxy_url)
 
-            if ok:
-                results["alive"] += 1
-                with self._lock:
-                    self._latency_map[proxy_url] = latency
-                logger.info(f"[健康检测] 代理可用: {proxy_url} (延迟 {latency:.2f}s)")
-            else:
-                results["dead"] += 1
-                dead_proxies.append(proxy_url)
-                with self._lock:
-                    self._latency_map[proxy_url] = -1.0
+        results["alive"] = len(alive_results)
+        results["dead"] = len(dead_proxies)
+
+        with self._lock:
+            for proxy_url, latency in alive_results:
+                self._latency_map[proxy_url] = latency
 
         # 踢出死亡代理
         for p in dead_proxies:

@@ -1,4 +1,9 @@
-"""Colab 测试脚本: 验证 DeepFilter 模型选择功能。"""
+"""Colab 测试脚本: 验证 DeepFilter 模型选择功能。
+
+用法:
+    !python scripts/test_deepfilter_model.py /content/你的音频.m4a
+    或不传参数则列出 /content 下的音频文件供选择
+"""
 
 from __future__ import annotations
 
@@ -7,6 +12,7 @@ import sys
 import time
 import tempfile
 import subprocess
+import glob
 
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -53,18 +59,63 @@ def ensure_df3_model():
     return DF3_MODEL_PATH
 
 
-def generate_test_wav(path: str, duration: float = 5.0, sr: int = 48000):
+def select_audio():
+    """选择音频文件: 命令行参数 > 列出 /content 下的音频文件。"""
+    if len(sys.argv) >= 2:
+        path = sys.argv[1]
+        if os.path.exists(path):
+            return path
+        print(f"ERROR: 文件不存在: {path}")
+        sys.exit(1)
+
+    # 搜索 /content 下的音频文件
+    exts = ["*.m4a", "*.mp3", "*.wav", "*.aac", "*.flac", "*.ogg"]
+    found = []
+    for ext in exts:
+        found.extend(glob.glob(f"/content/{ext}"))
+        found.extend(glob.glob(f"/content/**/{ext}", recursive=True))
+    found = sorted(set(found))
+
+    if not found:
+        print("未找到音频文件。请上传音频到 /content 或指定路径:")
+        print("  !python scripts/test_deepfilter_model.py /path/to/audio.m4a")
+        sys.exit(1)
+
+    print("找到以下音频文件:")
+    for i, f in enumerate(found, 1):
+        size = os.path.getsize(f) // 1024
+        print(f"  {i}. {f} ({size}KB)")
+
+    while True:
+        choice = input("\n选择文件序号 (或输入路径): ").strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(found):
+            return found[int(choice) - 1]
+        if os.path.exists(choice):
+            return choice
+        print("无效选择，请重试")
+
+
+def to_48k_wav(input_path: str) -> str:
+    """转为 48kHz mono WAV (DeepFilter 要求)。"""
+    if input_path.lower().endswith(".wav"):
+        # 检查采样率
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=sample_rate", "-of",
+             "default=noprint_wrappers=1:nokey=1", input_path],
+            capture_output=True, text=True,
+        )
+        if r.stdout.strip() == "48000":
+            return input_path
+
+    out = "/tmp/df_test_input_48k.wav"
     subprocess.run(
-        ["ffmpeg", "-y", "-f", "lavfi", "-i",
-         f"anoisesrc=color=white:amplitude=0.3:duration={duration}:sample_rate={sr}",
-         "-f", "lavfi", "-i",
-         f"sine=frequency=440:duration={duration}:sample_rate={sr}",
-         "-filter_complex", "[0:a][1:a]amix=inputs=2:weights=0.5 0.5",
-         "-ar", str(sr), "-ac", "1", "-sample_fmt", "s16",
-         "-acodec", "pcm_s16le", path],
+        ["ffmpeg", "-y", "-i", input_path, "-ar", "48000", "-ac", "1",
+         "-sample_fmt", "s16", "-acodec", "pcm_s16le", out],
         capture_output=True, check=True,
     )
-    print(f"测试音频: {path} ({duration}s, {sr}Hz)")
+    print(f"已转为 48kHz WAV: {out}")
+    return out
 
 
 def run_test(name: str, extra_args: list[str], test_wav: str) -> bool:
@@ -77,7 +128,6 @@ def run_test(name: str, extra_args: list[str], test_wav: str) -> bool:
     r = subprocess.run(cmd, capture_output=True, text=True)
     elapsed = time.time() - t0
 
-    # 打印所有输出用于调试
     if r.stdout.strip():
         print(f"  stdout: {r.stdout.strip()[:500]}")
     if r.stderr.strip():
@@ -87,11 +137,8 @@ def run_test(name: str, extra_args: list[str], test_wav: str) -> bool:
         print(f"  FAIL (exit={r.returncode}, {elapsed:.1f}s)")
         return False
 
-    # 列出输出目录所有文件
-    out_files = []
-    if os.path.isdir(out_dir):
-        out_files = os.listdir(out_dir)
-    print(f"  输出目录 {out_dir}: {out_files}")
+    out_files = os.listdir(out_dir) if os.path.isdir(out_dir) else []
+    print(f"  输出目录: {out_files}")
 
     if out_files:
         print(f"  PASS ({elapsed:.1f}s)")
@@ -101,15 +148,12 @@ def run_test(name: str, extra_args: list[str], test_wav: str) -> bool:
 
 
 def main():
+    audio_path = select_audio()
+    print(f"\n使用音频: {audio_path}")
+    print(f"  大小: {os.path.getsize(audio_path) // 1024}KB")
+
+    test_wav = to_48k_wav(audio_path)
     ensure_binary()
-
-    # 先看 --help 确认参数
-    print("\n--- deep-filter --help ---")
-    r = subprocess.run([DEEPFILTER_PATH, "--help"], capture_output=True, text=True)
-    print(r.stdout or r.stderr)
-
-    test_wav = tempfile.mktemp(suffix=".wav", prefix="df_input_")
-    generate_test_wav(test_wav)
 
     results = {}
 
