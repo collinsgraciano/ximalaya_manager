@@ -216,7 +216,8 @@ def _df_process_wav(wav_file: str, output_dir: str, model: str = DEFAULT_MODEL) 
     if model_path:
         cmd += ["-m", model_path]
     cmd += [wav_file, "--output-dir", output_dir]
-    subprocess.run(cmd, check=True, timeout=_DEEPFILTER_TIMEOUT)
+    subprocess.run(cmd, check=True, timeout=_DEEPFILTER_TIMEOUT,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return os.path.join(output_dir, os.path.basename(wav_file))
 
 
