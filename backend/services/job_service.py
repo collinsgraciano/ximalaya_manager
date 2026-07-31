@@ -423,62 +423,72 @@ def complete_job(job_id: int, result: dict | None = None) -> dict:
 
     - 全部章节已上传 → status='done', book_status='success'
     - 仍有 pending → 重新入队 (status='pending', retry_count++)，无限重试直到全部完成
+
+    使用单一事务，防止 requeue 和章节释放之间的竞态。
     """
-    job = fetch_one("SELECT book_id, retry_count, worker_id FROM public.xm_jobs WHERE job_id = %s", (job_id,))
-    if not job:
-        return {"ok": False, "error": "任务不存在"}
+    from ..database import transaction
+    from psycopg.rows import dict_row
 
-    book_id = job["book_id"]
-    retry_count = int(job.get("retry_count", 0))
+    with transaction() as conn:
+        cur = conn.cursor(row_factory=dict_row)
 
-    # 检查是否还有 pending 章节
-    remaining = fetch_val(
-        "SELECT COUNT(*) FROM public.audiobook_chapters WHERE book_id = %s AND upload_status = 'pending'",
-        (book_id,),
-    )
-    remaining = int(remaining or 0)
+        cur.execute("SELECT book_id, retry_count, worker_id FROM public.xm_jobs WHERE job_id = %s", (job_id,))
+        job = cur.fetchone()
+        if not job:
+            return {"ok": False, "error": "任务不存在"}
 
-    if remaining > 0:
-        # 重新入队，无限重试直到全部完成
-        execute(
-            sql.SQL("""
+        job = dict(job)
+        book_id = job["book_id"]
+        retry_count = int(job.get("retry_count", 0))
+
+        # 检查是否还有 pending 章节
+        cur.execute(
+            "SELECT COUNT(*) FROM public.audiobook_chapters WHERE book_id = %s AND upload_status = 'pending'",
+            (book_id,),
+        )
+        remaining_row = cur.fetchone()
+        remaining = int(remaining_row[0] if remaining_row else 0)
+
+        if remaining > 0:
+            # 重新入队 + 释放章节 + 更新 book_status — 原子操作
+            cur.execute(
+                """
                 UPDATE public.xm_jobs
                 SET status = 'pending', worker_id = NULL, claimed_at = NULL,
                     retry_count = retry_count + 1, result = %s
                 WHERE job_id = %s
-            """),
-            (Jsonb(result) if result else None, job_id),
-        )
-        # 释放 pending 章节的 worker 归属
-        execute(
-            sql.SQL("""
+                """,
+                (Jsonb(result) if result else None, job_id),
+            )
+            cur.execute(
+                """
                 UPDATE public.audiobook_chapters
                 SET worker_id = NULL, claimed_at = NULL
                 WHERE book_id = %s AND upload_status = 'pending'
-            """),
-            (book_id,),
-        )
-        execute(
-            sql.SQL("UPDATE public.books SET book_status = 'pending', updated_at = now() WHERE book_id = %s"),
-            (book_id,),
-        )
-        logger.info(f"任务 #{job_id} 还有 {remaining} 个 pending 章节，重新入队 (retry={retry_count + 1})")
-        return {"ok": True, "job_id": job_id, "requeued": True, "remaining": remaining,
-                "retry_count": retry_count + 1}
+                """,
+                (book_id,),
+            )
+            cur.execute(
+                "UPDATE public.books SET book_status = 'pending', updated_at = now() WHERE book_id = %s",
+                (book_id,),
+            )
+            logger.info(f"任务 #{job_id} 还有 {remaining} 个 pending 章节，重新入队 (retry={retry_count + 1})")
+            return {"ok": True, "job_id": job_id, "requeued": True, "remaining": remaining,
+                    "retry_count": retry_count + 1}
 
-    # 全部完成 → 标记 done, success
-    execute(
-        sql.SQL("""
+        # 全部完成 → 标记 done, success
+        cur.execute(
+            """
             UPDATE public.xm_jobs
             SET status = 'done', finished_at = now(), result = %s
             WHERE job_id = %s
-        """),
-        (Jsonb(result) if result else None, job_id),
-    )
-    execute(
-        sql.SQL("UPDATE public.books SET book_status = 'success', updated_at = now() WHERE book_id = %s"),
-        (book_id,),
-    )
+            """,
+            (Jsonb(result) if result else None, job_id),
+        )
+        cur.execute(
+            "UPDATE public.books SET book_status = 'success', updated_at = now() WHERE book_id = %s",
+            (book_id,),
+        )
 
     # 更新 Worker 统计
     if job.get("worker_id"):
