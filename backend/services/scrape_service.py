@@ -282,8 +282,15 @@ def _init_proxy_pool():
             if cache.get("proxies"):
                 cached_proxies = cache["proxies"]
                 logger.info(f"复用缓存代理: {len(cached_proxies)} 个 (永久缓存，失效即删)")
+            else:
+                cache_raw = ""  # 空缓存，标记需清
         except Exception as e:
-            logger.warning(f"解析代理缓存失败: {e}")
+            logger.warning(f"解析代理缓存失败: {e}, 清除脏数据")
+            execute(
+                sql.SQL("UPDATE public.global_settings SET setting_value = '' WHERE setting_key = 'PROXY_VERIFIED_CACHE'"),
+                (),
+            )
+            cache_raw = ""
 
     # 缓存为空 → 从 URL 自动发现
     if not cached_proxies:
