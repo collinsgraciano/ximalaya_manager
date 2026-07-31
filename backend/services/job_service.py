@@ -170,10 +170,39 @@ def create_jobs_for_all_pending(categories: list[str] | None = None,
 # ═══════════════════════════════════════════════════════════
 
 def _reset_stale_jobs():
-    """将超时的 processing 任务重置为 pending。
+    """回收处理中的任务。
 
-    判断依据：worker 心跳超时（last_seen_at 超过 90s）或认领超过 60 分钟（兜底）。
+    1. 自动完成：章节全部 uploaded 的 processing 任务 → done
+    2. 超时回收：worker 心跳超时或认领超过 60 分钟的 processing → pending
     """
+    # 1. 自动完成：所有章节已上传但任务还是 processing
+    execute(
+        sql.SQL("""
+            UPDATE public.xm_jobs
+            SET status = 'done', finished_at = now(),
+                result = jsonb_build_object('auto_completed', true)
+            WHERE status = 'processing'
+              AND NOT EXISTS (
+                  SELECT 1 FROM public.audiobook_chapters c
+                  WHERE c.book_id = xm_jobs.book_id
+                    AND c.upload_status = 'pending'
+              )
+        """),
+    )
+    # 同步更新 book_status
+    execute(
+        sql.SQL("""
+            UPDATE public.books
+            SET book_status = 'success', updated_at = now()
+            WHERE book_id IN (
+                SELECT book_id FROM public.xm_jobs
+                WHERE status = 'done' AND result->>'auto_completed' = 'true'
+            )
+              AND book_status != 'success'
+        """),
+    )
+
+    # 2. 超时回收
     execute(
         sql.SQL("""
             UPDATE public.xm_jobs
@@ -215,7 +244,33 @@ def claim_job(worker_id: str) -> dict | None:
     with transaction() as conn:
         cur = conn.cursor(row_factory=dict_row)
 
-        # 1. 回收超时任务
+        # 1a. 自动完成：章节全部 uploaded 的 processing 任务 → done
+        cur.execute(
+            """
+            UPDATE public.xm_jobs
+            SET status = 'done', finished_at = now(),
+                result = jsonb_build_object('auto_completed', true)
+            WHERE status = 'processing'
+              AND NOT EXISTS (
+                  SELECT 1 FROM public.audiobook_chapters c
+                  WHERE c.book_id = xm_jobs.book_id
+                    AND c.upload_status = 'pending'
+              )
+            """,
+        )
+        cur.execute(
+            """
+            UPDATE public.books
+            SET book_status = 'success', updated_at = now()
+            WHERE book_id IN (
+                SELECT book_id FROM public.xm_jobs
+                WHERE status = 'done' AND result->>'auto_completed' = 'true'
+            )
+              AND book_status != 'success'
+            """,
+        )
+
+        # 1b. 回收超时任务
         cur.execute(
             """
             UPDATE public.xm_jobs
