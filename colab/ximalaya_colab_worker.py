@@ -442,10 +442,14 @@ class ColabWorker:
                 "original_telegram_bot_id": original_telegram_bot_id,
                 "original_telegram_bot_user_id": original_telegram_bot_user_id,
             })
-            status_text = "OK" if upload_status == "uploaded" else "FAIL"
-            logger.info(f"  [{status_text}] 章节 {chapter_id}: {upload_status}"
-                       + (f" file_id={telegram_file_id[:20]}..." if telegram_file_id else "")
-                       + (f" err={error_message}" if error_message else ""))
+            ok = resp.get("ok", False)
+            status_text = "OK" if ok else "FAIL"
+            extra = ""
+            if ok and telegram_file_id:
+                extra = f" file_id={telegram_file_id[:20]}..."
+            elif not ok:
+                extra = f" err={resp.get('error', '未知错误')}"
+            logger.info(f"  [{status_text}] 章节 {chapter_id}: {upload_status}{extra}")
             return resp
         except Exception as e:
             logger.error(f"  上报失败: {e}")
@@ -509,8 +513,7 @@ class ColabWorker:
                 try:
                     chapter, result = future.result()
                     with self._counter_lock:
-                        if (chapter.get("upload_status") == "uploaded" or
-                           (result and result.get("upload_status") == "uploaded")):
+                        if result and result.get("ok"):
                             success_count += 1
                         else:
                             fail_count += 1
@@ -597,8 +600,7 @@ class ColabWorker:
                         else:
                             logger.info(f"  [{i+1}/{total}] {ch_name}")
                         result = self.process_chapter(job_id, chapter, book_id)
-                        if (chapter.get("upload_status") == "uploaded" or
-                           (result and result.get("upload_status") == "uploaded")):
+                        if result and result.get("ok"):
                             success_count += 1
                         else:
                             fail_count += 1
