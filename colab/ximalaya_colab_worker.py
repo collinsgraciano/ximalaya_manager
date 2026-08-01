@@ -113,19 +113,39 @@ class ColabWorker:
         params["worker_token"] = self.worker_token
         params["worker_id"] = self.worker_id
         url = f"{self.vps_url}{path}"
-        resp = requests.get(url, params=params, timeout=60)
-        return resp.json()
+        try:
+            resp = requests.get(url, params=params, timeout=60)
+            if resp.status_code != 200:
+                logger.warning(f"VPS 返回 {resp.status_code}: {resp.text[:200]}")
+                return {"ok": False, "error": f"HTTP {resp.status_code}"}
+            return resp.json()
+        except requests.exceptions.JSONDecodeError:
+            logger.warning(f"VPS 返回非 JSON: {resp.text[:200]}")
+            return {"ok": False, "error": "VPS 返回非 JSON"}
+        except Exception as e:
+            logger.warning(f"VPS 请求失败: {e}")
+            return {"ok": False, "error": str(e)}
 
     def _post(self, path: str, data: dict | None = None) -> dict:
         """POST 请求 VPS API。"""
         url = f"{self.vps_url}{path}"
-        resp = requests.post(
-            url,
-            json=data or {},
-            params={"worker_token": self.worker_token, "worker_id": self.worker_id},
-            timeout=60,
-        )
-        return resp.json()
+        try:
+            resp = requests.post(
+                url,
+                json=data or {},
+                params={"worker_token": self.worker_token, "worker_id": self.worker_id},
+                timeout=60,
+            )
+            if resp.status_code != 200:
+                logger.warning(f"VPS 返回 {resp.status_code}: {resp.text[:200]}")
+                return {"ok": False, "error": f"HTTP {resp.status_code}"}
+            return resp.json()
+        except requests.exceptions.JSONDecodeError:
+            logger.warning(f"VPS 返回非 JSON: {resp.text[:200]}")
+            return {"ok": False, "error": "VPS 返回非 JSON"}
+        except Exception as e:
+            logger.warning(f"VPS 请求失败: {e}")
+            return {"ok": False, "error": str(e)}
 
     # ─── 心跳 ───
 
@@ -460,6 +480,14 @@ class ColabWorker:
     def complete_job(self, job_id: int, result: dict | None = None):
         """标记任务完成。"""
         resp = self._post(f"/api/jobs/{job_id}/complete", {"result": result})
+        if not resp.get("ok"):
+            err = resp.get("error", "")
+            if "无权操作" in err or "不存在" in err:
+                # 任务已被 requeue/自动完成，无需处理
+                logger.info(f"任务 #{job_id} 已被服务端处理 ({err})")
+            else:
+                logger.warning(f"任务 #{job_id} 完成上报失败: {err}")
+            return resp
         if resp.get("requeued"):
             remaining = resp.get("remaining", 0)
             retry = resp.get("retry_count", 0)
