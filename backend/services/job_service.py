@@ -170,14 +170,21 @@ def create_jobs_for_all_pending(categories: list[str] | None = None,
 # ═══════════════════════════════════════════════════════════
 
 def _reset_stale_jobs():
-    """回收处理中的任务。
+    """回收处理中的任务（事务化）。
 
     1. 自动完成：章节全部 uploaded 的 processing 任务 → done
     2. 超时回收：worker 心跳超时或认领超过 60 分钟的 processing → pending
+       — 同时释放章节 worker_id（防止旧 Worker 盲处理）
     """
-    # 1. 自动完成：所有章节已上传但任务还是 processing
-    execute(
-        sql.SQL("""
+    from ..database import transaction
+    from psycopg.rows import dict_row
+
+    with transaction() as conn:
+        cur = conn.cursor(row_factory=dict_row)
+
+        # 1. 自动完成：所有章节已上传但任务还是 processing
+        cur.execute(
+            """
             UPDATE public.xm_jobs
             SET status = 'done', finished_at = now(),
                 result = jsonb_build_object('auto_completed', true)
@@ -187,11 +194,10 @@ def _reset_stale_jobs():
                   WHERE c.book_id = xm_jobs.book_id
                     AND c.upload_status = 'pending'
               )
-        """),
-    )
-    # 同步更新 book_status
-    execute(
-        sql.SQL("""
+            """,
+        )
+        cur.execute(
+            """
             UPDATE public.books
             SET book_status = 'success', updated_at = now()
             WHERE book_id IN (
@@ -199,28 +205,37 @@ def _reset_stale_jobs():
                 WHERE status = 'done' AND result->>'auto_completed' = 'true'
             )
               AND book_status != 'success'
-        """),
-    )
+            """,
+        )
 
-    # 2. 超时回收
-    execute(
-        sql.SQL("""
+        # 2. 超时回收 — RETURNING book_id + 释放章节 worker_id
+        cur.execute(
+            """
             UPDATE public.xm_jobs
             SET status = 'pending', worker_id = NULL, claimed_at = NULL
             WHERE status = 'processing'
               AND (
-                -- worker 心跳超时（主判断）
                 NOT EXISTS (
                     SELECT 1 FROM public.xm_worker_stats s
                     WHERE s.worker_id = xm_jobs.worker_id
                       AND s.last_seen_at > now() - (%s * interval '1 second')
                 )
-                -- 兜底：认领超过 60 分钟无论如何回收
                 OR claimed_at < now() - (%s * interval '1 minute')
               )
-        """),
-        (STALE_JOB_HEARTBEAT_SECONDS, STALE_JOB_FALLBACK_MINUTES),
-    )
+            RETURNING book_id
+            """,
+            (STALE_JOB_HEARTBEAT_SECONDS, STALE_JOB_FALLBACK_MINUTES),
+        )
+        stale_book_ids = [r["book_id"] for r in cur.fetchall()]
+        if stale_book_ids:
+            cur.execute(
+                """
+                UPDATE public.audiobook_chapters
+                SET worker_id = NULL, claimed_at = NULL
+                WHERE book_id = ANY(%s) AND upload_status = 'pending'
+                """,
+                (stale_book_ids,),
+            )
 
 
 # ═══════════════════════════════════════════════════════════
@@ -270,7 +285,7 @@ def claim_job(worker_id: str) -> dict | None:
             """,
         )
 
-        # 1b. 回收超时任务
+        # 1b. 回收超时任务 — 同时释放章节 worker_id（防止旧 Worker 盲处理）
         cur.execute(
             """
             UPDATE public.xm_jobs
@@ -284,9 +299,20 @@ def claim_job(worker_id: str) -> dict | None:
                 )
                 OR claimed_at < now() - (%s * interval '1 minute')
               )
+            RETURNING book_id
             """,
             (STALE_JOB_HEARTBEAT_SECONDS, STALE_JOB_FALLBACK_MINUTES),
         )
+        stale_book_ids = [r["book_id"] for r in cur.fetchall()]
+        if stale_book_ids:
+            cur.execute(
+                """
+                UPDATE public.audiobook_chapters
+                SET worker_id = NULL, claimed_at = NULL
+                WHERE book_id = ANY(%s) AND upload_status = 'pending'
+                """,
+                (stale_book_ids,),
+            )
 
         # 2. 优先找回自己 processing 的任务
         cur.execute(
@@ -392,74 +418,106 @@ def update_chapter_result(
     original_telegram_bot_id: int | None = None,
     original_telegram_bot_user_id: int | None = None,
 ) -> dict:
-    """更新章节处理结果。"""
-    # 获取 job 的 book_id
-    job = fetch_one("SELECT book_id FROM public.xm_jobs WHERE job_id = %s", (job_id,))
-    if not job:
-        return {"ok": False, "error": "任务不存在"}
+    """更新章节处理结果（事务化 + 幂等）。
 
-    book_id = job["book_id"]
+    - 事务化：章节更新 + done_chapters 计数 + remaining 查询在同一事务中，防止竞态
+    - 幂等：已 uploaded 的章节重复上报时直接返回成功，不覆盖时间戳、不重复计数
+    """
+    from ..database import transaction
+    from psycopg.rows import dict_row
 
-    # 更新章节状态
-    update_data = {
-        "upload_status": upload_status,
-        "error_message": error_message,
-    }
-    if telegram_file_id:
-        update_data["telegram_file_id"] = telegram_file_id
-    if telegram_message_id:
-        update_data["telegram_message_id"] = telegram_message_id
-    if telegram_bot_id is not None:
-        update_data["telegram_bot_id"] = telegram_bot_id
-    if telegram_bot_user_id is not None:
-        update_data["telegram_bot_user_id"] = telegram_bot_user_id
-    # 原始音频 TG 缓存
-    if original_telegram_file_id:
-        update_data["original_telegram_file_id"] = original_telegram_file_id
-    if original_telegram_message_id:
-        update_data["original_telegram_message_id"] = original_telegram_message_id
-    if original_telegram_bot_id is not None:
-        update_data["original_telegram_bot_id"] = original_telegram_bot_id
-    if original_telegram_bot_user_id is not None:
-        update_data["original_telegram_bot_user_id"] = original_telegram_bot_user_id
-    if upload_status == "uploaded":
-        # 使用 UTC 时间避免 Colab Worker 与 VPS 时区不一致
-        from datetime import datetime, timezone
-        update_data["uploaded_at"] = datetime.now(timezone.utc)
-    else:
-        # 失败回退为 pending：清除 worker 归属，使下次可被重新认领
-        update_data["worker_id"] = None
-        update_data["claimed_at"] = None
+    with transaction() as conn:
+        cur = conn.cursor(row_factory=dict_row)
 
-    set_parts = sql.SQL(", ").join(
-        sql.SQL("{} = {}").format(sql.Identifier(k), sql.Placeholder())
-        for k in update_data.keys()
-    )
-    execute(
-        sql.SQL("UPDATE public.audiobook_chapters SET {} WHERE book_id = %s AND chapter_id = %s").format(set_parts),
-        tuple(list(update_data.values()) + [book_id, str(chapter_id)]),
-    )
+        # 1. 获取 book_id
+        cur.execute("SELECT book_id FROM public.xm_jobs WHERE job_id = %s", (job_id,))
+        job = cur.fetchone()
+        if not job:
+            return {"ok": False, "error": "任务不存在"}
+        book_id = job["book_id"]
 
-    # 更新 job 的 done_chapters 计数（仅统计已上传的）
-    if upload_status == "uploaded":
-        execute(
-            sql.SQL("""
+        # 2. 幂等检查：已 uploaded 的章节不重复处理
+        cur.execute(
+            "SELECT upload_status FROM public.audiobook_chapters WHERE book_id = %s AND chapter_id = %s",
+            (book_id, str(chapter_id)),
+        )
+        existing = cur.fetchone()
+        if existing and existing.get("upload_status") == "uploaded":
+            cur.execute(
+                "SELECT COUNT(*) as cnt FROM public.audiobook_chapters WHERE book_id = %s AND upload_status = 'pending'",
+                (book_id,),
+            )
+            rem = cur.fetchone()
+            remaining_count = int((rem or {}).get("cnt", 0))
+            return {
+                "ok": True,
+                "chapter_id": chapter_id,
+                "upload_status": "uploaded",
+                "remaining": remaining_count,
+                "duplicate": True,
+            }
+
+        # 3. 构建更新数据
+        update_data = {
+            "upload_status": upload_status,
+            "error_message": error_message,
+        }
+        if telegram_file_id:
+            update_data["telegram_file_id"] = telegram_file_id
+        if telegram_message_id:
+            update_data["telegram_message_id"] = telegram_message_id
+        if telegram_bot_id is not None:
+            update_data["telegram_bot_id"] = telegram_bot_id
+        if telegram_bot_user_id is not None:
+            update_data["telegram_bot_user_id"] = telegram_bot_user_id
+        # 原始音频 TG 缓存
+        if original_telegram_file_id:
+            update_data["original_telegram_file_id"] = original_telegram_file_id
+        if original_telegram_message_id:
+            update_data["original_telegram_message_id"] = original_telegram_message_id
+        if original_telegram_bot_id is not None:
+            update_data["original_telegram_bot_id"] = original_telegram_bot_id
+        if original_telegram_bot_user_id is not None:
+            update_data["original_telegram_bot_user_id"] = original_telegram_bot_user_id
+        if upload_status == "uploaded":
+            from datetime import datetime, timezone
+            update_data["uploaded_at"] = datetime.now(timezone.utc)
+        else:
+            # 失败回退为 pending：清除 worker 归属，使下次可被重新认领
+            update_data["worker_id"] = None
+            update_data["claimed_at"] = None
+
+        # 4. 更新章节状态
+        set_parts = sql.SQL(", ").join(
+            sql.SQL("{} = {}").format(sql.Identifier(k), sql.Placeholder())
+            for k in update_data.keys()
+        )
+        cur.execute(
+            sql.SQL("UPDATE public.audiobook_chapters SET {} WHERE book_id = %s AND chapter_id = %s").format(set_parts),
+            tuple(list(update_data.values()) + [book_id, str(chapter_id)]),
+        )
+
+        # 5. 更新 job 的 done_chapters 计数（仅统计已上传的）
+        if upload_status == "uploaded":
+            cur.execute(
+                """
                 UPDATE public.xm_jobs
                 SET done_chapters = (
                     SELECT COUNT(*) FROM public.audiobook_chapters
                     WHERE book_id = %s AND upload_status = 'uploaded'
                 )
                 WHERE job_id = %s
-            """),
-            (book_id, job_id),
-        )
+                """,
+                (book_id, job_id),
+            )
 
-    # 检查是否全部完成
-    remaining = fetch_one(
-        "SELECT COUNT(*) as cnt FROM public.audiobook_chapters WHERE book_id = %s AND upload_status = 'pending'",
-        (book_id,),
-    )
-    remaining_count = int((remaining or {}).get("cnt", 0))
+        # 6. 查询剩余 pending 章节数
+        cur.execute(
+            "SELECT COUNT(*) as cnt FROM public.audiobook_chapters WHERE book_id = %s AND upload_status = 'pending'",
+            (book_id,),
+        )
+        rem = cur.fetchone()
+        remaining_count = int((rem or {}).get("cnt", 0))
 
     return {
         "ok": True,
@@ -697,7 +755,11 @@ def _update_worker_stats(worker_id: str, success: bool, chapters: int = 0):
 
 
 def heartbeat(worker_id: str) -> dict:
-    """Worker 心跳，更新 last_seen_at。"""
+    """Worker 心跳：更新 last_seen_at + 续期 job 租约 + 检测 job 丢失。
+
+    - 续期 claimed_at 使活跃 Worker 的任务不会被 60 分钟兜底超时回收
+    - 返回 job_lost 标志让 Worker 知道任务是否被回收
+    """
     execute(
         sql.SQL("""
             INSERT INTO public.xm_worker_stats (worker_id, last_seen_at, updated_at)
@@ -708,7 +770,19 @@ def heartbeat(worker_id: str) -> dict:
         """),
         (worker_id,),
     )
-    return {"ok": True, "worker_id": worker_id}
+    # 续期 job 租约：更新 claimed_at 防止 60 分钟兜底超时
+    execute(
+        sql.SQL("UPDATE public.xm_jobs SET claimed_at = now() WHERE worker_id = %s AND status = 'processing'"),
+        (worker_id,),
+    )
+    # 检测 Worker 是否仍持有 processing 任务
+    job = fetch_one(
+        "SELECT job_id FROM public.xm_jobs WHERE worker_id = %s AND status = 'processing'",
+        (worker_id,),
+    )
+    if not job:
+        return {"ok": True, "worker_id": worker_id, "job_lost": True}
+    return {"ok": True, "worker_id": worker_id, "job_lost": False, "job_id": job["job_id"]}
 
 
 def add_chapter_to_worker(worker_id: str, count: int = 1):

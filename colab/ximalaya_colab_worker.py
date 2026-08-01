@@ -104,6 +104,7 @@ class ColabWorker:
         self.config: dict = {}
         self._heartbeat_stop = threading.Event()
         self._counter_lock = threading.Lock()
+        self._job_lost = threading.Event()
 
     # ─── HTTP 工具 ───
 
@@ -153,7 +154,10 @@ class ColabWorker:
         """后台心跳线程，每 30s 发送一次。"""
         while not self._heartbeat_stop.is_set():
             try:
-                self._post("/api/worker/heartbeat", {"worker_id": self.worker_id})
+                resp = self._post("/api/worker/heartbeat", {"worker_id": self.worker_id})
+                if resp.get("job_lost"):
+                    logger.warning("任务已被服务端回收，通知主线程停止")
+                    self._job_lost.set()
             except Exception:
                 pass
             self._heartbeat_stop.wait(30)
@@ -525,6 +529,8 @@ class ColabWorker:
         pbar = tqdm(total=total, desc=f"Job #{job_id}", unit="ch") if tqdm else None
 
         def _process_one(idx: int, chapter: dict) -> tuple[dict, dict]:
+            if self._job_lost.is_set():
+                return chapter, {"ok": False, "error": "job lost"}
             thread_name = threading.current_thread().name
             ch_name = chapter.get('chapter_name', '')[:30]
             logger.info(f"  [{idx+1}/{total}] {ch_name} ({thread_name})")
@@ -538,6 +544,11 @@ class ColabWorker:
             }
 
             for future in as_completed(futures):
+                if self._job_lost.is_set():
+                    logger.warning("任务已被服务端回收，取消剩余章节")
+                    for f in futures:
+                        f.cancel()
+                    break
                 try:
                     chapter, result = future.result()
                     with self._counter_lock:
@@ -594,6 +605,8 @@ class ColabWorker:
                     time.sleep(poll_interval)
                     continue
 
+                self._job_lost.clear()  # 重置任务丢失标志
+
                 job_id = job["job_id"]
                 book_id = job.get("book_id", "")
                 chapters = job.get("chapters", [])
@@ -622,6 +635,9 @@ class ColabWorker:
                     fail_count = 0
                     pbar = tqdm(chapters, desc=f"Job #{job_id}", unit="ch") if tqdm else None
                     for i, chapter in enumerate(chapters or []):
+                        if self._job_lost.is_set():
+                            logger.warning("任务已被服务端回收，停止处理剩余章节")
+                            break
                         ch_name = chapter.get('chapter_name', '')[:30]
                         if pbar:
                             pbar.set_postfix_str(ch_name)
