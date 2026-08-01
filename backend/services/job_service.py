@@ -502,7 +502,7 @@ def complete_job(job_id: int, result: dict | None = None) -> dict:
             (book_id,),
         )
         remaining_row = cur.fetchone()
-        remaining = int(remaining_row[0] if remaining_row else 0)
+        remaining = int(list(remaining_row.values())[0]) if remaining_row else 0
 
         if remaining > 0:
             # 重新入队 + 释放章节 + 更新 book_status — 原子操作
