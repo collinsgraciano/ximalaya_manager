@@ -334,9 +334,9 @@ class ColabWorker:
                         # 代理池空了, 自动补充
                         proxies = self._refill_proxy_pool(pool) or None
                     if proxies:
-                        logger.info(f"  下载失败, 换代理重试 ({dl_attempt+1}/{download_retries})")
+                        logger.info(f"  下载失败[{status}], 换代理重试 ({dl_attempt+1}/{download_retries})")
                     else:
-                        logger.warning(f"  下载失败且无可用代理")
+                        logger.warning(f"  下载失败[{status}]且无可用代理")
                 if dl_attempt < download_retries - 1:
                     time.sleep(2)
 

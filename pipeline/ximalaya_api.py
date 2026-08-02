@@ -585,15 +585,16 @@ def get_album_info(album_id: str, headers: dict | None = None,
 def get_download_url(track_id: str, headers: dict | None = None,
                      max_retries: int = 3,
                      proxies: dict | None = None,
-                     quality_priority: list[str] | None = None) -> tuple[str | None, int]:
+                     quality_priority: list[str] | None = None) -> tuple[str | None, int, str | None]:
     """通过 mobile-playpage API 获取音频下载 URL。
 
-    返回 (url, file_size) 或 (None, 0)
+    返回 (url, file_size, error)，error 为 None 表示无错误。
     """
     hdrs = {**DEFAULT_HEADERS, **(headers or {})}
     if "Referer" not in hdrs:
         hdrs["Referer"] = f"{BASE_URL}/album"
 
+    last_error = None
     for attempt in range(max_retries):
         try:
             ts = int(time.time() * 1000)
@@ -604,7 +605,7 @@ def get_download_url(track_id: str, headers: dict | None = None,
             data = resp.json()
 
             if data.get("ret") != 0:
-                return None, 0
+                return None, 0, f"API错误 ret={data.get('ret')}"
 
             track_info = data.get("trackInfo", {})
             play_urls = track_info.get("playUrlList", [])
@@ -617,24 +618,25 @@ def get_download_url(track_id: str, headers: dict | None = None,
                 if pu and pu.get("url"):
                     url = crack_playurl(pu["url"])
                     if url.startswith("http"):
-                        return url, int(pu.get("fileSize", 0))
+                        return url, int(pu.get("fileSize", 0)), None
 
             # 取第一个可用的
             for pu in play_urls:
                 if isinstance(pu, dict) and pu.get("url"):
                     url = crack_playurl(pu["url"])
                     if url.startswith("http"):
-                        return url, int(pu.get("fileSize", 0))
+                        return url, int(pu.get("fileSize", 0)), None
 
-            return None, 0
+            return None, 0, "无可用播放URL"
 
-        except Exception:
+        except Exception as e:
+            last_error = str(e)
             if attempt < max_retries - 1:
                 time.sleep(3 * (attempt + 1))
             else:
-                return None, 0
+                return None, 0, last_error
 
-    return None, 0
+    return None, 0, last_error or "未知错误"
 
 
 def download_track(track_id: str, save_path: str, headers: dict | None = None,
@@ -651,10 +653,10 @@ def download_track(track_id: str, save_path: str, headers: dict | None = None,
     if os.path.exists(save_path) and os.path.getsize(save_path) > 1000:
         return "skipped", os.path.getsize(save_path)
 
-    download_url, file_size = get_download_url(track_id, headers, max_retries=max_retries,
+    download_url, file_size, url_error = get_download_url(track_id, headers, max_retries=max_retries,
                                                 proxies=proxies, quality_priority=quality_priority)
     if not download_url:
-        return "no_url", 0
+        return f"no_url: {url_error}", 0
 
     hdrs = {**DEFAULT_HEADERS, **(headers or {})}
     tmp_path = save_path + ".tmp"
