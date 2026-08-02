@@ -324,6 +324,10 @@ class ColabWorker:
                                                     max_retries=1)
                 if status in ("downloaded", "skipped"):
                     break
+                # 专辑本身的错误 (API返回错误/无播放URL), 非代理问题, 不再重试
+                if "API错误" in status or "无可用播放URL" in status:
+                    logger.warning(f"  专辑无法下载: {status}")
+                    return {"ok": False, "album_broken": True, "error": status}
                 # 下载失败: 踢出当前代理, 换一个重试
                 if pool and proxies:
                     proxy_url = proxies.get("http") or proxies.get("https")
@@ -518,7 +522,7 @@ class ColabWorker:
     # ─── 多线程并行处理章节 ───
 
     def process_chapters_parallel(self, job_id: int, chapters: list,
-                                  book_id: str) -> tuple[int, int]:
+                                  book_id: str) -> tuple[int, int, bool]:
         """多线程并行处理同一任务内的多个章节。"""
         total = len(chapters)
         num_threads = min(self.num_workers, total)
@@ -526,6 +530,7 @@ class ColabWorker:
 
         success_count = 0
         fail_count = 0
+        album_broken = False
         pbar = tqdm(total=total, desc=f"Job #{job_id}", unit="ch") if tqdm else None
 
         def _process_one(idx: int, chapter: dict) -> tuple[dict, dict]:
@@ -551,6 +556,12 @@ class ColabWorker:
                     break
                 try:
                     chapter, result = future.result()
+                    if result and result.get("album_broken"):
+                        album_broken = True
+                        logger.warning(f"专辑无法下载, 取消剩余章节")
+                        for f in futures:
+                            f.cancel()
+                        break
                     with self._counter_lock:
                         if result and result.get("ok"):
                             success_count += 1
@@ -569,7 +580,7 @@ class ColabWorker:
 
         if pbar:
             pbar.close()
-        return success_count, fail_count
+        return success_count, fail_count, album_broken
 
     # ─── 主循环 ───
 
@@ -626,13 +637,14 @@ class ColabWorker:
 
                 if self.num_workers > 1:
                     # 多线程并行处理
-                    success_count, fail_count = self.process_chapters_parallel(
+                    success_count, fail_count, album_broken = self.process_chapters_parallel(
                         job_id, chapters, book_id
                     )
                 else:
                     # 单线程串行处理
                     success_count = 0
                     fail_count = 0
+                    album_broken = False
                     pbar = tqdm(chapters, desc=f"Job #{job_id}", unit="ch") if tqdm else None
                     for i, chapter in enumerate(chapters or []):
                         if self._job_lost.is_set():
@@ -644,6 +656,10 @@ class ColabWorker:
                         else:
                             logger.info(f"  [{i+1}/{total}] {ch_name}")
                         result = self.process_chapter(job_id, chapter, book_id)
+                        if result and result.get("album_broken"):
+                            album_broken = True
+                            logger.warning(f"专辑无法下载, 取消剩余章节")
+                            break
                         if result and result.get("ok"):
                             success_count += 1
                         else:
@@ -652,6 +668,13 @@ class ColabWorker:
                             pbar.set_postfix_str(f"OK={success_count} FAIL={fail_count}")
                     if pbar:
                         pbar.close()
+
+                # 专辑无法下载: 标记失败, 继续下一个任务
+                if album_broken:
+                    self.fail_job(job_id, "专辑无法下载: API返回错误或无播放URL")
+                    jobs_done += 1
+                    logger.info(f"任务 #{job_id} 已标记失败 (专辑无法下载), 继续下一个任务")
+                    continue
 
                 # 标记任务完成
                 if fail_count == 0:
