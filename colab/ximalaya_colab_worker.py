@@ -504,10 +504,10 @@ class ColabWorker:
             logger.info(f"任务 #{job_id} 已完成")
         return resp
 
-    def fail_job(self, job_id: int, error_message: str):
-        """标记任务失败。"""
-        resp = self._post(f"/api/jobs/{job_id}/fail", {"error_message": error_message})
-        logger.error(f"任务 #{job_id} 失败: {error_message}")
+    def delete_job(self, job_id: int, reason: str = ""):
+        """删除任务（不删除专辑和已上传的章节）。"""
+        resp = self._post(f"/api/jobs/{job_id}/delete", {"reason": reason})
+        logger.info(f"任务 #{job_id} 已删除: {reason}")
         return resp
 
     def release_job(self):
@@ -669,11 +669,11 @@ class ColabWorker:
                     if pbar:
                         pbar.close()
 
-                # 专辑无法下载: 标记失败, 继续下一个任务
+                # 专辑无法下载: 删除任务, 继续下一个
                 if album_broken:
-                    self.fail_job(job_id, "专辑无法下载: API返回错误或无播放URL")
+                    self.delete_job(job_id, "专辑无法下载: API返回错误或无播放URL")
                     jobs_done += 1
-                    logger.info(f"任务 #{job_id} 已标记失败 (专辑无法下载), 继续下一个任务")
+                    logger.info(f"任务 #{job_id} 已删除 (专辑无法下载), 继续下一个任务")
                     continue
 
                 # 标记任务完成
