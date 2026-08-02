@@ -965,14 +965,16 @@ def get_album_chapters(book_id: str, page: int = 1, page_size: int = 50,
 
 
 def delete_album(book_id: str) -> int:
-    """删除专辑及其章节。"""
+    """删除专辑及其章节和任务。"""
     execute(sql.SQL("DELETE FROM public.audiobook_chapters WHERE book_id = %s"), (book_id,))
+    execute(sql.SQL("DELETE FROM public.xm_jobs WHERE book_id = %s"), (book_id,))
     return execute(sql.SQL("DELETE FROM public.books WHERE book_id = %s"), (book_id,))
 
 
 def delete_all_albums() -> int:
-    """删除所有专辑及其章节。"""
+    """删除所有专辑及其章节和任务。"""
     execute(sql.SQL("DELETE FROM public.audiobook_chapters"))
+    execute(sql.SQL("DELETE FROM public.xm_jobs"))
     return execute(sql.SQL("DELETE FROM public.books"))
 
 

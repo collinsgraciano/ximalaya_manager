@@ -840,7 +840,10 @@ def get_job_detail(job_id: int) -> dict | None:
 
 
 def get_worker_stats() -> list[dict]:
-    """获取所有 Worker 统计。"""
+    """获取所有 Worker 统计（自动清理 24 小时未连接的 Worker）。"""
+    execute(
+        sql.SQL("DELETE FROM public.xm_worker_stats WHERE last_seen_at < now() - interval '24 hours'"),
+    )
     return fetch_all(
         "SELECT * FROM public.xm_worker_stats ORDER BY updated_at DESC"
     ) or []
