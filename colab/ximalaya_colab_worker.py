@@ -178,8 +178,9 @@ class ColabWorker:
             resp = self._get("/api/config", {"worker_id": self.worker_id})
             if resp.get("ok"):
                 self.config = resp.get("config", {})
+                cookie_status = '已配置(' + str(len(self.config.get('xm_cookie', ''))) + '字符)' if self.config.get('xm_cookie') else '未配置'
                 logger.info(f"配置获取成功: TG tokens={len(self.config.get('tg_bot_tokens', []))}, "
-                           f"deepfilter={self.config.get('enable_deepfilter', True)}")
+                           f"deepfilter={self.config.get('enable_deepfilter', True)}, cookie={cookie_status}")
 
                 # 初始化代理池
                 self._init_proxy()
