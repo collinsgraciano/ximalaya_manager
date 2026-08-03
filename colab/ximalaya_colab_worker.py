@@ -96,11 +96,12 @@ class ColabWorker:
     """Colab Worker 客户端。"""
 
     def __init__(self, vps_url: str, worker_id: str, worker_token: str,
-                 num_workers: int = 1):
+                 num_workers: int = 1, no_proxy: bool = False):
         self.vps_url = vps_url.rstrip("/")
         self.worker_id = worker_id
         self.worker_token = worker_token
         self.num_workers = max(1, num_workers)
+        self.no_proxy = no_proxy
         self.config: dict = {}
         self._heartbeat_stop = threading.Event()
         self._counter_lock = threading.Lock()
@@ -192,6 +193,10 @@ class ColabWorker:
 
     def _init_proxy(self):
         """根据配置初始化代理池（仅一次，后续调用直接跳过）。"""
+        if self.no_proxy:
+            logger.info("已跳过代理池初始化（--no-proxy 模式，直连下载）")
+            return
+
         from pipeline.proxy_pool import get_pool
         if get_pool() is not None:
             return  # 已初始化，跳过
@@ -690,6 +695,7 @@ def main():
     parser.add_argument("--max-jobs", type=int, default=0, help="最大处理任务数 (0=不限)")
     parser.add_argument("--num-workers", type=int, default=1, help="并行线程数 (1=单线程, >1=多线程, 默认1)")
     parser.add_argument("--install-deps", action="store_true", help="自动安装依赖")
+    parser.add_argument("--no-proxy", action="store_true", help="禁用代理池，直连喜马拉雅下载")
     args = parser.parse_args()
 
     # 生成 Worker ID
@@ -714,6 +720,7 @@ def main():
         worker_id=worker_id,
         worker_token=args.worker_token,
         num_workers=args.num_workers,
+        no_proxy=args.no_proxy,
     )
     worker.run(poll_interval=args.poll_interval, max_jobs=args.max_jobs)
 
