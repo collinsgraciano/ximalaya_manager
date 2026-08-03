@@ -863,8 +863,12 @@ def scrape_album_tracks(book_id: str, proxies: dict | None = None) -> dict:
 # ═══════════════════════════════════════════════════════════
 
 def get_albums(page: int = 1, page_size: int = 20, category: str = "",
-               search: str = "", status: str = "") -> dict:
-    """分页查询专辑列表。"""
+               search: str = "", status: str = "", finished: str = "") -> dict:
+    """分页查询专辑列表。
+
+    Args:
+        finished: 完本筛选。'2'=完本, '1'=未完本, ''=不筛选。
+    """
     conditions = []
     params: list = []
 
@@ -877,6 +881,10 @@ def get_albums(page: int = 1, page_size: int = 20, category: str = "",
     if status:
         conditions.append("book_status = %s")
         params.append(status)
+    if finished == "2":
+        conditions.append("book_data->>'isFinished' = '2'")
+    elif finished == "1":
+        conditions.append("COALESCE(book_data->>'isFinished', '0') != '2'")
 
     where_clause = (" WHERE " + " AND ".join(conditions)) if conditions else ""
 
@@ -969,6 +977,26 @@ def delete_album(book_id: str) -> int:
     execute(sql.SQL("DELETE FROM public.audiobook_chapters WHERE book_id = %s"), (book_id,))
     execute(sql.SQL("DELETE FROM public.xm_jobs WHERE book_id = %s"), (book_id,))
     return execute(sql.SQL("DELETE FROM public.books WHERE book_id = %s"), (book_id,))
+
+
+def mark_paid_albums_failed() -> int:
+    """将待处理专辑中非免费/非VIP免费的付费专辑标记为失败。
+
+    保留（不动）：
+      - 完全免费: isPaid=false
+      - VIP免费: isPaid=true, vipType=2
+    标记失败：
+      - 纯喜点购买: isPaid=true, vipType=0
+      - 儿童VIP: isPaid=true, vipType=3
+      - 特殊订阅: isPaid=true, vipType=1
+    """
+    return execute(sql.SQL("""
+        UPDATE public.books
+        SET book_status = 'failed', updated_at = now()
+        WHERE book_status = 'pending'
+          AND book_data->>'isPaid' = 'true'
+          AND book_data->>'vipType' != '2'
+    """))
 
 
 def delete_all_albums() -> int:

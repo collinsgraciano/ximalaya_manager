@@ -56,8 +56,9 @@ def api_albums(
     category: str = Query(""),
     search: str = Query(""),
     status: str = Query(""),
+    finished: str = Query(""),
 ):
-    return get_albums(page, page_size, category, search, status)
+    return get_albums(page, page_size, category, search, status, finished)
 
 
 # ═══════════════════════════════════════
@@ -295,6 +296,17 @@ def api_delete_all_albums():
 
 
 # ═══════════════════════════════════════
+# 标记付费专辑为失败
+# ═══════════════════════════════════════
+
+@router.post("/albums/mark-paid-failed")
+def api_mark_paid_failed():
+    from ..services.scrape_service import mark_paid_albums_failed
+    count = mark_paid_albums_failed()
+    return {"ok": True, "marked": count}
+
+
+# ═══════════════════════════════════════
 # 批量获取所有专辑章节（后台线程）
 # ═══════════════════════════════════════
 
@@ -324,6 +336,7 @@ def api_scrape_all_tracks_stop():
 class CreateAllJobsRequest(BaseModel):
     categories: list[str] | None = None
     max_workers: int = 5
+    finished_only: bool = False
 
 
 @router.post("/albums/create-all-jobs")
@@ -331,7 +344,9 @@ def api_create_all_jobs(req: CreateAllJobsRequest | None = None):
     from ..services.job_service import create_jobs_for_all_pending
     categories = req.categories if req else None
     max_workers = req.max_workers if req else 5
-    jobs = create_jobs_for_all_pending(categories, max_workers=max_workers)
+    finished_only = req.finished_only if req else False
+    jobs = create_jobs_for_all_pending(categories, max_workers=max_workers,
+                                       finished_only=finished_only)
     return {"ok": True, "count": len(jobs), "jobs": jobs}
 
 
