@@ -180,8 +180,8 @@ class ProxyPool:
         # proxy_url → 延迟秒数（-1 = 未测速）
         self._latency_map: dict[str, float] = {p: -1.0 for p in self._all_proxies}
 
-        # round-robin 计数器（在同延迟段内轮换）
-        self._counter = 0
+        # round-robin 计数器（随机起始, 避免多实例同时命中同一代理）
+        self._counter = random.randint(0, max(len(self._all_proxies) - 1, 0))
 
         # 是否已做过 health_check
         self._checked = False
