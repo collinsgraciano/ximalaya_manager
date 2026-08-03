@@ -325,19 +325,29 @@ class ColabWorker:
                                                     max_retries=1)
                 if status in ("downloaded", "skipped"):
                     break
-                # 下载失败: 踢出当前代理, 换一个重试
-                if pool and proxies:
-                    proxy_url = proxies.get("http") or proxies.get("https")
-                    if proxy_url:
-                        pool.mark_dead(proxy_url)
-                    proxies = pool.get() or None
-                    if not proxies:
-                        # 代理池空了, 自动补充
-                        proxies = self._refill_proxy_pool(pool) or None
+                # 系统繁忙 (ret=1001): 不踢出代理, 只轮换, 等一下还能用
+                if "系统繁忙" in status or "ret=1001" in status:
+                    if pool:
+                        proxies = pool.get() or None
+                        if not proxies:
+                            proxies = self._refill_proxy_pool(pool) or None
                     if proxies:
                         logger.info(f"  下载失败[{status}], 换代理重试 ({dl_attempt+1}/{download_retries})")
                     else:
                         logger.warning(f"  下载失败[{status}]且无可用代理")
+                else:
+                    # 其他失败: 踢出当前代理, 换一个重试
+                    if pool and proxies:
+                        proxy_url = proxies.get("http") or proxies.get("https")
+                        if proxy_url:
+                            pool.mark_dead(proxy_url)
+                        proxies = pool.get() or None
+                        if not proxies:
+                            proxies = self._refill_proxy_pool(pool) or None
+                        if proxies:
+                            logger.info(f"  下载失败[{status}], 换代理重试 ({dl_attempt+1}/{download_retries})")
+                        else:
+                            logger.warning(f"  下载失败[{status}]且无可用代理")
                 if dl_attempt < download_retries - 1:
                     time.sleep(2)
 
