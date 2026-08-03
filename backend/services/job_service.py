@@ -104,7 +104,8 @@ def create_jobs_batch(book_ids: list[str]) -> list[dict]:
 
 
 def create_jobs_for_all_pending(categories: list[str] | None = None,
-                                max_workers: int = 5) -> list[dict]:
+                                max_workers: int = 5,
+                                finished_only: bool = False) -> list[dict]:
     """为未完成、不在任务队列的专辑创建任务（多线程）。
 
     如果专辑未获取章节或章节不全，会自动先获取章节列表（每个线程随机选代理）再创建任务。
@@ -112,12 +113,16 @@ def create_jobs_for_all_pending(categories: list[str] | None = None,
     Args:
         categories: 可选分类列表，仅在这些分类中筛选。None=所有分类。
         max_workers: 最大并发线程数。
+        finished_only: 仅为完本专辑（isFinished=2）创建任务。
     """
-    cat_clause = sql.SQL("")
+    clauses = []
     params: list = []
     if categories:
-        cat_clause = sql.SQL(" AND b.category = ANY(%s)")
+        clauses.append(sql.SQL(" AND b.category = ANY(%s)"))
         params.append(categories)
+    if finished_only:
+        clauses.append(sql.SQL(" AND b.book_data->>'isFinished' = '2'"))
+    extra_clause = sql.SQL("").join(clauses)
 
     # 查找未完成、不在任务队列的专辑（不要求已有章节）
     rows = fetch_all(
@@ -130,9 +135,9 @@ def create_jobs_for_all_pending(categories: list[str] | None = None,
                   WHERE j.book_id = b.book_id
                     AND j.status IN ('pending', 'processing')
               )
-              {cat_clause}
+              {extra_clause}
             ORDER BY b.book_id
-        """).format(cat_clause=cat_clause),
+        """).format(extra_clause=extra_clause),
         tuple(params) if params else None,
     )
 
@@ -820,7 +825,7 @@ def get_jobs(page: int = 1, page_size: int = 20, status: str = "") -> dict:
 
     offset = (page - 1) * page_size
     rows = fetch_all(
-        sql.SQL("SELECT * FROM public.xm_jobs{} ORDER BY created_at DESC LIMIT %s OFFSET %s").format(
+        sql.SQL("SELECT * FROM public.xm_jobs{} ORDER BY (status = 'processing') DESC, created_at DESC LIMIT %s OFFSET %s").format(
             sql.SQL(where_clause)
         ),
         tuple(params + [page_size, offset]),
