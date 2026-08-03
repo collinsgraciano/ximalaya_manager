@@ -51,6 +51,7 @@ services:
     volumes:
       - ./backend:/app/backend:ro
       - ./pipeline:/app/pipeline:ro
+      - ./supabase_backup:/app/supabase_backup:ro
       - ./backups:/app/backups
       - ./.env:/app/.env:ro
     ports:

@@ -19,3 +19,7 @@ pycryptodome==3.20.0
 # ─── 工具 ───
 tqdm==4.66.2
 python-dotenv==1.0.1
+
+# ─── B2 云备份 ───
+boto3>=1.34.0
+paramiko>=3.4.0

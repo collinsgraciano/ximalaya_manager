@@ -13,7 +13,7 @@ from fastapi.templating import Jinja2Templates
 
 from .settings import settings as app_settings
 from .auth import AuthMiddleware, COOKIE_NAME, COOKIE_MAX_AGE, create_auth_cookie_value
-from .api import albums, jobs, workers, settings_api, dashboard
+from .api import albums, jobs, workers, settings_api, dashboard, backup_api
 
 logging.basicConfig(
     level=logging.INFO,
@@ -75,6 +75,7 @@ app.include_router(albums.router)
 app.include_router(jobs.router)
 app.include_router(workers.router)
 app.include_router(settings_api.router)
+app.include_router(backup_api.router)
 
 # Jinja2 模板
 templates_dir = Path(__file__).parent / "templates"
@@ -150,6 +151,11 @@ async def page_workers(request: Request):
 @app.get("/settings", response_class=HTMLResponse)
 async def page_settings(request: Request):
     return templates.TemplateResponse("settings.html", {"request": request})
+
+
+@app.get("/backup", response_class=HTMLResponse)
+async def page_backup(request: Request):
+    return templates.TemplateResponse("backup.html", {"request": request})
 
 
 @app.get("/api/system/health")

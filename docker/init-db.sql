@@ -171,5 +171,16 @@ INSERT INTO public.global_settings (setting_key, setting_value, description, is_
     ('PROXY_TEST_URL', 'https://www.ximalaya.com', '代理健康检测URL', false),
     ('PROXY_DEAD_RETRY_MINUTES', '5', '死亡代理重试间隔（分钟）', false),
     ('PROXY_TIMEOUT', '10', '代理请求超时秒数', false),
-    ('XM_AUDIO_QUALITY', 'M4A_24', '下载音质优先级（从左到右依次尝试）。可选值：M4A_24, MP3_32, MP3_64, M4A_64, M4A_128。多个用逗号分隔，如 M4A_24,MP3_32,M4A_128', false)
+    ('XM_AUDIO_QUALITY', 'M4A_24', '下载音质优先级（从左到右依次尝试）。可选值：M4A_24, MP3_32, MP3_64, M4A_64, M4A_128。多个用逗号分隔，如 M4A_24,MP3_32,M4A_128', false),
+    -- B2 云备份配置
+    ('B2_ENDPOINT', '', 'Backblaze B2 S3 Endpoint (如 s3.us-west-004.backblazeb2.com)', false),
+    ('B2_ACCESS_KEY_ID', '', 'B2 App Key ID', true),
+    ('B2_SECRET_ACCESS_KEY', '', 'B2 App Key (applicationKey)', true),
+    ('B2_BUCKET', 'xm-backups', 'B2 Bucket 名称', false),
+    ('VPS_HOST', '117.55.234.219', 'VPS SSH 主机地址', false),
+    ('VPS_PORT', '22', 'VPS SSH 端口', false),
+    ('VPS_USER', 'root', 'VPS SSH 用户名', false),
+    ('VPS_PASS', '', 'VPS SSH 密码', true),
+    ('BACKUP_KEEP', '7', '保留备份数量', false),
+    ('BACKUP_INTERVAL_HOURS', '24', '定时备份间隔（小时）', false)
 ON CONFLICT (setting_key) DO NOTHING;
