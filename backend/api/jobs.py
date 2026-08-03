@@ -154,18 +154,6 @@ def api_fail_job(job_id: int, req: JobFail,
     return fail_job(job_id, req.error_message)
 
 
-@router.post("/jobs/{job_id}/delete")
-def api_worker_delete_job(job_id: int, worker_id: str = Query(...)):
-    """Worker 删除任务（专辑无法下载时调用）。"""
-    job_row = fetch_one("SELECT worker_id FROM public.xm_jobs WHERE job_id = %s", (job_id,))
-    if not job_row:
-        return {"ok": False, "error": "任务不存在"}
-    if job_row.get("worker_id") != worker_id:
-        return {"ok": False, "error": "无权操作此任务"}
-
-    return delete_job(job_id)
-
-
 # ═══════════════════════════════════════
 # 手动重置任务
 # ═══════════════════════════════════════
