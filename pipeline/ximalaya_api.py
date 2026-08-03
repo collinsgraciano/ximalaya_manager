@@ -605,7 +605,9 @@ def get_download_url(track_id: str, headers: dict | None = None,
             data = resp.json()
 
             if data.get("ret") != 0:
-                return None, 0, f"API错误 ret={data.get('ret')}"
+                # 完整响应展示, 方便分析错误原因
+                resp_dump = json.dumps(data, ensure_ascii=False)
+                return None, 0, f"API错误 ret={data.get('ret')} 响应={resp_dump}"
 
             track_info = data.get("trackInfo", {})
             play_urls = track_info.get("playUrlList", [])
@@ -630,7 +632,15 @@ def get_download_url(track_id: str, headers: dict | None = None,
             return None, 0, "无可用播放URL"
 
         except Exception as e:
-            last_error = str(e)
+            # 非 JSON 响应 (HTML 错误页等) 也展示出来
+            try:
+                body = resp.text if resp is not None else ""
+                if body:
+                    last_error = f"{e} 响应={body[:2000]}"
+                else:
+                    last_error = str(e)
+            except Exception:
+                last_error = str(e)
             if attempt < max_retries - 1:
                 time.sleep(3 * (attempt + 1))
             else:
@@ -681,6 +691,15 @@ def download_track(track_id: str, save_path: str, headers: dict | None = None,
             return "downloaded", actual_size
 
         except Exception as e:
+            # 附带响应体, 方便分析 (403/502 等错误时喜马拉雅可能返回错误 JSON)
+            try:
+                body = resp.text if resp is not None else ""
+                if body:
+                    err_msg = f"{e} 响应={body[:2000]}"
+                else:
+                    err_msg = str(e)
+            except Exception:
+                err_msg = str(e)
             if os.path.exists(tmp_path):
                 try:
                     os.remove(tmp_path)
@@ -689,6 +708,6 @@ def download_track(track_id: str, save_path: str, headers: dict | None = None,
             if attempt < max_retries - 1:
                 time.sleep(5 * (attempt + 1))
             else:
-                return f"download_failed: {e}", 0
+                return f"download_failed: {err_msg}", 0
 
     return "unknown_error", 0
