@@ -337,6 +337,7 @@ class CreateAllJobsRequest(BaseModel):
     categories: list[str] | None = None
     max_workers: int = 5
     finished_only: bool = False
+    free_only: bool = False
 
 
 @router.post("/albums/create-all-jobs")
@@ -345,8 +346,10 @@ def api_create_all_jobs(req: CreateAllJobsRequest | None = None):
     categories = req.categories if req else None
     max_workers = req.max_workers if req else 5
     finished_only = req.finished_only if req else False
+    free_only = req.free_only if req else False
     jobs = create_jobs_for_all_pending(categories, max_workers=max_workers,
-                                       finished_only=finished_only)
+                                       finished_only=finished_only,
+                                       free_only=free_only)
     return {"ok": True, "count": len(jobs), "jobs": jobs}
 
 

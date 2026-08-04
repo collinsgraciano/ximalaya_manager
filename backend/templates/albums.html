@@ -316,6 +316,10 @@
                     <input type="checkbox" class="form-check-input" id="create-jobs-finished-only">
                     <label class="form-check-label" for="create-jobs-finished-only">仅完本专辑（isFinished=2）</label>
                 </div>
+                <div class="form-check mb-3">
+                    <input type="checkbox" class="form-check-input" id="create-jobs-free-only">
+                    <label class="form-check-label" for="create-jobs-free-only">仅完全免费（isPaid=false）</label>
+                </div>
                 <div class="d-flex align-items-center gap-2">
                     <label class="form-label small mb-0">并发线程</label>
                     <input type="number" class="form-control form-control-sm" id="create-jobs-workers-input" value="5" min="1" max="20" style="width: 80px">
@@ -627,11 +631,15 @@ async function doCreateAllJobs() {
     const categories = Array.from(document.querySelectorAll('.job-cat-checkbox:checked')).map(cb => cb.value);
     const maxWorkers = parseInt(document.getElementById('create-jobs-workers-input')?.value) || 5;
     const finishedOnly = document.getElementById('create-jobs-finished-only')?.checked || false;
+    const freeOnly = document.getElementById('create-jobs-free-only')?.checked || false;
     const catLabel = categories.length > 0 ? `（${categories.length} 个分类）` : '（全部分类）';
-    const finishLabel = finishedOnly ? '，仅完本' : '';
-    if (!confirm(`确认为符合条件的专辑创建任务？${catLabel}${finishLabel}\n并发线程: ${maxWorkers}`)) return;
+    const labels = [];
+    if (finishedOnly) labels.push('仅完本');
+    if (freeOnly) labels.push('仅免费');
+    const extraLabel = labels.length ? `，${labels.join('、')}` : '';
+    if (!confirm(`确认为符合条件的专辑创建任务？${catLabel}${extraLabel}\n并发线程: ${maxWorkers}`)) return;
     try {
-        const body = { max_workers: maxWorkers, finished_only: finishedOnly };
+        const body = { max_workers: maxWorkers, finished_only: finishedOnly, free_only: freeOnly };
         if (categories.length > 0) body.categories = categories;
         const data = await api('/api/albums/create-all-jobs', {
             method: 'POST',

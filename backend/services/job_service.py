@@ -105,7 +105,8 @@ def create_jobs_batch(book_ids: list[str]) -> list[dict]:
 
 def create_jobs_for_all_pending(categories: list[str] | None = None,
                                 max_workers: int = 5,
-                                finished_only: bool = False) -> list[dict]:
+                                finished_only: bool = False,
+                                free_only: bool = False) -> list[dict]:
     """为未完成、不在任务队列的专辑创建任务（多线程）。
 
     如果专辑未获取章节或章节不全，会自动先获取章节列表（每个线程随机选代理）再创建任务。
@@ -114,6 +115,7 @@ def create_jobs_for_all_pending(categories: list[str] | None = None,
         categories: 可选分类列表，仅在这些分类中筛选。None=所有分类。
         max_workers: 最大并发线程数。
         finished_only: 仅为完本专辑（isFinished=2）创建任务。
+        free_only: 仅为完全免费专辑（isPaid=false）创建任务。
     """
     clauses = []
     params: list = []
@@ -122,6 +124,8 @@ def create_jobs_for_all_pending(categories: list[str] | None = None,
         params.append(categories)
     if finished_only:
         clauses.append(sql.SQL(" AND b.book_data->>'isFinished' = '2'"))
+    if free_only:
+        clauses.append(sql.SQL(" AND b.book_data->>'isPaid' != 'true'"))
     extra_clause = sql.SQL("").join(clauses)
 
     # 查找未完成、不在任务队列的专辑（不要求已有章节）
