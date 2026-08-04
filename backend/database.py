@@ -18,8 +18,8 @@ from .settings import get_dsn
 _pool = None
 _pool_lock = threading.Lock()
 _POOL_MIN = 1
-_POOL_MAX = 5
-_POOL_TIMEOUT = 10
+_POOL_MAX = 8
+_POOL_TIMEOUT = 30
 
 
 def _get_pool():

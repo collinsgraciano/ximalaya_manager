@@ -3,41 +3,52 @@
 from __future__ import annotations
 
 from fastapi import APIRouter
-from ..database import fetch_one, fetch_all
+from ..database import fetch_one
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
 
 
 @router.get("/dashboard/stats")
 def dashboard_stats():
-    """仪表盘统计数据。"""
-    # 单条 SQL 合并所有 COUNT 查询，减少 DB 往返
-    counts = fetch_one("""
+    """仪表盘统计数据 — 单条 SQL 合并所有查询，减少 DB 往返和连接占用。"""
+    row = fetch_one("""
+        WITH counts AS (
+            SELECT
+                (SELECT COUNT(*) FROM public.books)                                          AS albums_total,
+                (SELECT COUNT(*) FROM public.audiobook_chapters)                              AS chapters_total,
+                (SELECT COUNT(*) FROM public.audiobook_chapters WHERE upload_status = 'uploaded') AS chapters_uploaded,
+                (SELECT COUNT(*) FROM public.audiobook_chapters WHERE upload_status = 'pending')  AS chapters_pending,
+                (SELECT COUNT(*) FROM public.audiobook_chapters WHERE upload_status = 'failed')   AS chapters_failed,
+                (SELECT COUNT(*) FROM public.xm_jobs WHERE status = 'pending')                AS jobs_pending,
+                (SELECT COUNT(*) FROM public.xm_jobs WHERE status = 'processing')             AS jobs_processing,
+                (SELECT COUNT(*) FROM public.xm_jobs WHERE status = 'done')                    AS jobs_done,
+                (SELECT COUNT(*) FROM public.xm_jobs WHERE status = 'failed')                  AS jobs_failed,
+                (SELECT COUNT(*) FROM public.xm_worker_stats WHERE last_seen_at > now() - interval '5 minutes') AS workers_active
+        ),
+        recent_jobs AS (
+            SELECT json_agg(row_to_json(t)) AS jobs
+            FROM (
+                SELECT job_id, book_id, book_name, status, worker_id,
+                       total_chapters, done_chapters, created_at, claimed_at, finished_at
+                FROM public.xm_jobs ORDER BY created_at DESC LIMIT 10
+            ) t
+        ),
+        category_stats AS (
+            SELECT json_agg(row_to_json(t)) AS categories
+            FROM (
+                SELECT category, COUNT(*) AS album_count
+                FROM public.books GROUP BY category ORDER BY album_count DESC
+            ) t
+        )
         SELECT
-            (SELECT COUNT(*) FROM public.books)                                          AS albums_total,
-            (SELECT COUNT(*) FROM public.audiobook_chapters)                              AS chapters_total,
-            (SELECT COUNT(*) FROM public.audiobook_chapters WHERE upload_status = 'uploaded') AS chapters_uploaded,
-            (SELECT COUNT(*) FROM public.audiobook_chapters WHERE upload_status = 'pending')  AS chapters_pending,
-            (SELECT COUNT(*) FROM public.audiobook_chapters WHERE upload_status = 'failed')   AS chapters_failed,
-            (SELECT COUNT(*) FROM public.xm_jobs WHERE status = 'pending')                AS jobs_pending,
-            (SELECT COUNT(*) FROM public.xm_jobs WHERE status = 'processing')             AS jobs_processing,
-            (SELECT COUNT(*) FROM public.xm_jobs WHERE status = 'done')                    AS jobs_done,
-            (SELECT COUNT(*) FROM public.xm_jobs WHERE status = 'failed')                  AS jobs_failed,
-            (SELECT COUNT(*) FROM public.xm_worker_stats WHERE last_seen_at > now() - interval '5 minutes') AS workers_active
+            (SELECT row_to_json(counts))  AS counts,
+            (SELECT jobs FROM recent_jobs) AS recent_jobs,
+            (SELECT categories FROM category_stats) AS category_stats
     """)
-    counts = counts or {}
-
-    # 最近任务
-    recent_jobs = fetch_all(
-        "SELECT job_id, book_id, book_name, status, worker_id, "
-        "total_chapters, done_chapters, created_at, claimed_at, finished_at "
-        "FROM public.xm_jobs ORDER BY created_at DESC LIMIT 10"
-    )
-
-    # 分类统计
-    category_stats = fetch_all(
-        "SELECT category, COUNT(*) as album_count FROM public.books GROUP BY category ORDER BY album_count DESC"
-    )
+    row = row or {}
+    counts = row.get("counts") or {}
+    recent_jobs = row.get("recent_jobs") or []
+    category_stats = row.get("category_stats") or []
 
     return {
         "albums": {
@@ -58,6 +69,6 @@ def dashboard_stats():
         "workers": {
             "active": int(counts.get("workers_active") or 0),
         },
-        "recent_jobs": recent_jobs or [],
-        "category_stats": category_stats or [],
+        "recent_jobs": recent_jobs,
+        "category_stats": category_stats,
     }
