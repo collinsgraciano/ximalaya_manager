@@ -198,7 +198,7 @@ def _pg_dump_to_file(filepath: str) -> int:
         "--clean", "--if-exists",
         "-f", filepath,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=_pg_env)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, env=_pg_env)
     if result.returncode != 0:
         raise RuntimeError(f"pg_dump 失败: {result.stderr[:300]}")
     return os.path.getsize(filepath)
@@ -211,7 +211,7 @@ def _psql_restore(filepath: str) -> tuple[int, str, str]:
             ["psql", "-h", DB_HOST, "-p", DB_PORT, "-U", DB_USER, "-d", DB_NAME],
             stdin=f,
             capture_output=True,
-            timeout=600,
+            timeout=3600,
             env=_pg_env,
         )
     return result.returncode, result.stdout.decode("utf-8", errors="replace"), result.stderr.decode("utf-8", errors="replace")
