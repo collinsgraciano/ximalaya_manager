@@ -545,18 +545,27 @@ def start_scheduled_backup(interval_hours: float) -> dict:
 
     _schedule_stop_event.clear()
     _schedule_interval = interval_hours
-    _schedule_next_run = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 持久化到 DB（重启后自动恢复）
+    _save_schedule_state(True, interval_hours)
+
+    from datetime import timedelta
+    next_dt = datetime.now() + timedelta(hours=interval_hours)
+    _schedule_next_run = next_dt.strftime("%Y-%m-%d %H:%M:%S")
 
     _schedule_thread = threading.Thread(target=_schedule_worker, args=(interval_hours,), daemon=True)
     _schedule_thread.start()
 
-    logger.info(f"定时备份已启动，间隔 {interval_hours} 小时")
-    return {"ok": True, "message": f"定时备份已启动，每 {interval_hours} 小时一次"}
+    logger.info(f"定时备份已启动，间隔 {interval_hours} 小时，首次将在 {next_dt.strftime('%H:%M')} 执行")
+    return {"ok": True, "message": f"定时备份已启动，每 {interval_hours} 小时一次，首次将在 {next_dt.strftime('%Y-%m-%d %H:%M')} 执行"}
 
 
 def stop_scheduled_backup() -> dict:
     """停止定时备份线程。"""
     global _schedule_next_run
+
+    # 持久化关闭状态
+    _save_schedule_state(False, _schedule_interval)
 
     if not _schedule_thread or not _schedule_thread.is_alive():
         _schedule_next_run = None
@@ -578,11 +587,67 @@ def get_schedule_status() -> dict:
     }
 
 
+def _save_schedule_state(enabled: bool, interval_hours: float):
+    """将定时备份开关状态持久化到 DB。"""
+    import json
+    state = json.dumps({"enabled": enabled, "interval_hours": interval_hours})
+    execute(
+        pg_sql.SQL("""
+            INSERT INTO public.global_settings (setting_key, setting_value, description, is_secret, updated_at)
+            VALUES ('BACKUP_SCHEDULE_STATE', %s, '定时备份开关状态（内部使用，JSON）', false, now())
+            ON CONFLICT (setting_key) DO UPDATE SET
+                setting_value = EXCLUDED.setting_value,
+                updated_at = now()
+        """),
+        (state,),
+    )
+
+
+def restore_schedule_on_startup():
+    """应用启动时检查 DB 中的定时备份状态，如果之前是开启的则自动恢复。
+
+    应在 FastAPI lifespan 中调用。
+    """
+    global _schedule_interval
+
+    try:
+        row = fetch_one(
+            "SELECT setting_value FROM public.global_settings WHERE setting_key = 'BACKUP_SCHEDULE_STATE'"
+        )
+        if not row:
+            return
+
+        import json
+        state = json.loads(row.get("setting_value", "{}"))
+        if state.get("enabled"):
+            interval = float(state.get("interval_hours", 24))
+            _schedule_interval = interval
+            logger.info(f"恢复定时备份状态：开启，间隔 {interval} 小时")
+            _schedule_stop_event.clear()
+            global _schedule_thread
+            from datetime import timedelta
+            next_dt = datetime.now() + timedelta(hours=interval)
+            global _schedule_next_run
+            _schedule_next_run = next_dt.strftime("%Y-%m-%d %H:%M:%S")
+            _schedule_thread = threading.Thread(target=_schedule_worker, args=(interval,), daemon=True)
+            _schedule_thread.start()
+    except Exception as e:
+        logger.warning(f"恢复定时备份状态失败: {e}")
+
+
 def _schedule_worker(interval_hours: float):
-    """定时备份工作线程。"""
+    """定时备份工作线程。先等待间隔时间，再执行备份。"""
     global _schedule_last_run, _schedule_next_run
 
     while not _schedule_stop_event.is_set():
+        # 先等待间隔时间，再执行备份
+        wait_seconds = interval_hours * 3600
+        if _schedule_stop_event.wait(timeout=wait_seconds):
+            break  # stop_event 被 set
+
+        if _schedule_stop_event.is_set():
+            break
+
         # 执行备份
         if not _backup_running:
             logger.info("定时备份触发")
@@ -598,10 +663,5 @@ def _schedule_worker(interval_hours: float):
         from datetime import timedelta
         next_dt = datetime.now() + timedelta(hours=interval_hours)
         _schedule_next_run = next_dt.strftime("%Y-%m-%d %H:%M:%S")
-
-        # 等待间隔
-        wait_seconds = interval_hours * 3600
-        if _schedule_stop_event.wait(timeout=wait_seconds):
-            break  # stop_event 被 set
 
     logger.info("定时备份线程已退出")

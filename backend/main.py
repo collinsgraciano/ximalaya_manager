@@ -47,6 +47,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"数据库迁移失败（非致命）: {e}")
 
+    # 恢复定时备份状态（如果之前是开启的）
+    try:
+        from .services.backup_service import restore_schedule_on_startup
+        restore_schedule_on_startup()
+    except Exception as e:
+        logger.warning(f"恢复定时备份状态失败（非致命）: {e}")
+
     yield
 
     # 关闭连接池
