@@ -49,29 +49,7 @@
                 </div>
 
                 <div class="col-md-6">
-                    <h6 class="border-bottom pb-2 mb-3"><i class="bi bi-server"></i> VPS SSH</h6>
-                    <div class="mb-2">
-                        <label class="form-label small mb-1">VPS Host <span class="text-muted">— SSH 主机地址</span></label>
-                        <input type="text" class="form-control form-control-sm" id="cfg-VPS_HOST" placeholder="117.55.234.219">
-                    </div>
-                    <div class="row">
-                        <div class="col-4 mb-2">
-                            <label class="form-label small mb-1">SSH Port</label>
-                            <input type="text" class="form-control form-control-sm" id="cfg-VPS_PORT" placeholder="22">
-                        </div>
-                        <div class="col-8 mb-2">
-                            <label class="form-label small mb-1">SSH User</label>
-                            <input type="text" class="form-control form-control-sm" id="cfg-VPS_USER" placeholder="root">
-                        </div>
-                    </div>
-                    <div class="mb-2">
-                        <label class="form-label small mb-1">VPS Password <i class="bi bi-lock-fill text-muted"></i></label>
-                        <div class="input-group input-group-sm">
-                            <input type="password" class="form-control" id="cfg-VPS_PASS" placeholder="SSH 密码">
-                            <button class="btn btn-outline-secondary" type="button" onclick="togglePw('cfg-VPS_PASS', this)"><i class="bi bi-eye"></i></button>
-                        </div>
-                    </div>
-                    <h6 class="border-bottom pb-2 mb-3 mt-3"><i class="bi bi-gear"></i> 备份设置</h6>
+                    <h6 class="border-bottom pb-2 mb-3"><i class="bi bi-gear"></i> 备份设置</h6>
                     <div class="row">
                         <div class="col-6 mb-2">
                             <label class="form-label small mb-1">保留份数</label>
@@ -81,6 +59,9 @@
                             <label class="form-label small mb-1">定时间隔 (小时)</label>
                             <input type="number" class="form-control form-control-sm" id="cfg-BACKUP_INTERVAL_HOURS" placeholder="24" min="1" step="0.5">
                         </div>
+                    </div>
+                    <div class="alert alert-info small mt-3 mb-0">
+                        <i class="bi bi-info-circle"></i> 备份在 Web 容器内直接执行 pg_dump 并上传到 B2，无需 SSH。
                     </div>
                 </div>
             </div>
@@ -180,7 +161,6 @@ async function loadConfig() {
         const data = await api('/api/backup/config');
         const cfg = data.config;
         const keys = ['B2_ENDPOINT','B2_ACCESS_KEY_ID','B2_SECRET_ACCESS_KEY','B2_BUCKET',
-                       'VPS_HOST','VPS_PORT','VPS_USER','VPS_PASS',
                        'BACKUP_KEEP','BACKUP_INTERVAL_HOURS'];
         keys.forEach(k => {
             const el = document.getElementById('cfg-' + k);
@@ -201,7 +181,6 @@ async function loadConfig() {
 
 async function saveConfig() {
     const keys = ['B2_ENDPOINT','B2_ACCESS_KEY_ID','B2_SECRET_ACCESS_KEY','B2_BUCKET',
-                   'VPS_HOST','VPS_PORT','VPS_USER','VPS_PASS',
                    'BACKUP_KEEP','BACKUP_INTERVAL_HOURS'];
     const config = {};
     keys.forEach(k => {

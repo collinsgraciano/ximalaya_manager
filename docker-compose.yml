@@ -54,6 +54,7 @@ services:
       - ./supabase_backup:/app/supabase_backup:ro
       - ./backups:/app/backups
       - ./.env:/app/.env:ro
+      - ./docker-compose.yml:/app/docker-compose.yml:ro
     ports:
       - "59388:59388"
     networks:

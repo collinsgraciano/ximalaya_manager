@@ -2,6 +2,9 @@
 
 备份/恢复操作在后台线程中运行，通过模块级状态变量轮询进度。
 定时备份使用独立线程 + threading.Event 控制。
+
+Web 容器与 PostgreSQL 容器在同一 Docker 网络，直接用 subprocess 调 pg_dump/psql，
+配置文件通过 Docker volume 挂载直接读写，无需 SSH。
 """
 
 from __future__ import annotations
@@ -10,9 +13,12 @@ import sys
 import os
 import io
 import time
+import gzip
+import shutil
+import subprocess
 import threading
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from ..database import fetch_one, fetch_all, execute
@@ -29,10 +35,6 @@ BACKUP_CONFIG_KEYS = [
     ("B2_ACCESS_KEY_ID",     "B2 App Key ID",                                                True),
     ("B2_SECRET_ACCESS_KEY", "B2 App Key (applicationKey)",                                  True),
     ("B2_BUCKET",            "B2 Bucket 名称",                                               False),
-    ("VPS_HOST",             "VPS SSH 主机地址",                                             False),
-    ("VPS_PORT",             "VPS SSH 端口",                                                 False),
-    ("VPS_USER",             "VPS SSH 用户名",                                               False),
-    ("VPS_PASS",             "VPS SSH 密码",                                                 True),
     ("BACKUP_KEEP",          "保留备份数量",                                                 False),
     ("BACKUP_INTERVAL_HOURS","定时备份间隔 (小时)",                                          False),
 ]
@@ -43,10 +45,6 @@ BACKUP_CONFIG_DEFAULTS = {
     "B2_ACCESS_KEY_ID": "",
     "B2_SECRET_ACCESS_KEY": "",
     "B2_BUCKET": "xm-backups",
-    "VPS_HOST": "117.55.234.219",
-    "VPS_PORT": "22",
-    "VPS_USER": "root",
-    "VPS_PASS": "",
     "BACKUP_KEEP": "7",
     "BACKUP_INTERVAL_HOURS": "24",
 }
@@ -162,6 +160,60 @@ def _init_common_config():
 
 
 # ═══════════════════════════════════════════
+# 本地操作（Web 容器内直接执行，无需 SSH）
+# ═══════════════════════════════════════════
+
+# 数据库连接信息（Docker 内部网络）
+DB_HOST = os.environ.get("DB_HOST", "postgres")
+DB_PORT = os.environ.get("DB_PORT", "5432")
+DB_USER = os.environ.get("VPS_DB_USER", os.environ.get("POSTGRES_USER", "xm_app"))
+DB_NAME = os.environ.get("VPS_DB_NAME", os.environ.get("POSTGRES_DB", "ximalaya"))
+
+# 配置文件路径（通过 Docker volume 挂载）
+ENV_FILE = "/app/.env"
+COMPOSE_FILE = "/app/docker-compose.yml"
+# backups volume 挂载点，用于临时文件和恢复的配置文件
+TMP_DIR = Path("/app/backups")
+TMP_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _pg_dump_to_file(filepath: str) -> int:
+    """直接在 Web 容器内执行 pg_dump，输出到文件。返回文件大小（字节）。"""
+    cmd = [
+        "pg_dump",
+        "-h", DB_HOST,
+        "-p", DB_PORT,
+        "-U", DB_USER,
+        "-d", DB_NAME,
+        "--no-owner", "--no-privileges",
+        "--clean", "--if-exists",
+        "-f", filepath,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if result.returncode != 0:
+        raise RuntimeError(f"pg_dump 失败: {result.stderr[:300]}")
+    return os.path.getsize(filepath)
+
+
+def _psql_restore(filepath: str) -> tuple[int, str, str]:
+    """直接在 Web 容器内执行 psql 恢复。返回 (exit_code, stdout, stderr)。"""
+    with open(filepath, "rb") as f:
+        result = subprocess.run(
+            ["psql", "-h", DB_HOST, "-p", DB_PORT, "-U", DB_USER, "-d", DB_NAME],
+            stdin=f,
+            capture_output=True,
+            timeout=600,
+        )
+    return result.returncode, result.stdout.decode("utf-8", errors="replace"), result.stderr.decode("utf-8", errors="replace")
+
+
+def _count_table(table: str) -> int:
+    """查询表行数。"""
+    row = fetch_one(f"SELECT count(*) AS cnt FROM {table}")
+    return int((row or {}).get("cnt", 0)) if row else 0
+
+
+# ═══════════════════════════════════════════
 # 备份状态
 # ═══════════════════════════════════════════
 
@@ -205,7 +257,7 @@ def run_backup_async():
 
 
 def _backup_worker():
-    """备份工作线程。"""
+    """备份工作线程。直接在 Web 容器内执行，无需 SSH。"""
     global _backup_running, _backup_progress, _backup_result
 
     try:
@@ -214,9 +266,6 @@ def _backup_worker():
         if not common.check_b2_config():
             _backup_result = {"ok": False, "error": "B2 配置不完整"}
             return
-        if not common.check_vps_config():
-            _backup_result = {"ok": False, "error": "VPS SSH 配置不完整"}
-            return
 
         _backup_progress = "检查 B2 Bucket..."
         if not common.ensure_bucket():
@@ -224,75 +273,45 @@ def _backup_worker():
             return
 
         ts = common.timestamp_str()
-        vps_host = common.get_vps_host()
-        vps_container = common.get_vps_container()
-        vps_db_user = common.get_vps_db_user()
-        vps_db_name = common.get_vps_db_name()
-        vps_project_dir = common.get_vps_project_dir()
 
-        remote_dump = "/tmp/xm_b2_dump.sql"
-        remote_env = f"{vps_project_dir}/.env"
-        remote_compose = f"{vps_project_dir}/docker-compose.yml"
-
-        _backup_progress = f"连接 SSH ({vps_host})..."
-        try:
-            ssh = common.ssh_connect()
-        except Exception as e:
-            _backup_result = {"ok": False, "error": f"SSH 连接失败: {e}"}
-            return
-
-        # pg_dump (不压缩，节省 VPS CPU)
+        # pg_dump 直接导出到本地持久化目录
         _backup_progress = "导出数据库 (pg_dump)..."
-        remote_dump = "/tmp/xm_b2_dump.sql"
-        dump_cmd = (
-            f"docker exec {vps_container} "
-            f"pg_dump -U {vps_db_user} -d {vps_db_name} "
-            f"--no-owner --no-privileges --clean --if-exists "
-            f"> {remote_dump}"
-        )
-        exit_code, out, err = common.run_remote(ssh, dump_cmd, timeout=300)
-        if exit_code != 0:
-            ssh.close()
-            _backup_result = {"ok": False, "error": f"pg_dump 失败: {err[:200]}"}
-            return
-
-        _, size_out, _ = common.run_remote(ssh, f"stat -c%s {remote_dump} 2>/dev/null || echo 0")
-        dump_size = int(size_out) if size_out.strip().isdigit() else 0
+        dump_path = str(TMP_DIR / "xm_dump.sql")
+        dump_size = _pg_dump_to_file(dump_path)
 
         # 超过 1GB 则压缩（B2 免费版每日下载 1GB 限额）
         COMPRESS_THRESHOLD = 1024 * 1024 * 1024  # 1GB
         if dump_size > COMPRESS_THRESHOLD:
             _backup_progress = f"dump {common.format_size(dump_size)} > 1GB，压缩中..."
-            exit_code, _, err = common.run_remote(ssh, f"gzip -f {remote_dump}", timeout=300)
-            if exit_code != 0:
-                ssh.close()
-                _backup_result = {"ok": False, "error": f"gzip 失败: {err}"}
-                return
-            remote_file = remote_dump + ".gz"
+            with open(dump_path, "rb") as f_in:
+                with gzip.open(dump_path + ".gz", "wb") as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+            os.remove(dump_path)
+            final_path = dump_path + ".gz"
             b2_name = "db_dump.sql.gz"
             b2_ct = "application/gzip"
         else:
-            remote_file = remote_dump
+            final_path = dump_path
             b2_name = "db_dump.sql"
             b2_ct = "application/sql"
 
-        _, size_out2, _ = common.run_remote(ssh, f"stat -c%s {remote_file} 2>/dev/null || echo 0")
-        final_size = int(size_out2) if size_out2.strip().isdigit() else 0
+        final_size = os.path.getsize(final_path)
 
-        _backup_progress = f"下载 dump ({common.format_size(final_size)})..."
-        dump_data = common.sftp_read(ssh, remote_file)
-        common.run_remote(ssh, f"rm -f {remote_dump} {remote_dump}.gz")
+        # 读取 dump 文件
+        _backup_progress = f"读取 dump ({common.format_size(final_size)})..."
+        with open(final_path, "rb") as f:
+            dump_data = f.read()
+        os.remove(final_path)
 
-        # 下载配置文件
-        _backup_progress = "下载配置文件..."
+        # 读取配置文件（通过 Docker volume 挂载）
+        _backup_progress = "读取配置文件..."
         config_files = {}
-        for name, remote_path in [(".env", remote_env), ("docker-compose.yml", remote_compose)]:
-            try:
-                config_files[name] = common.sftp_read(ssh, remote_path)
-            except Exception:
-                pass
-
-        ssh.close()
+        if os.path.exists(ENV_FILE):
+            with open(ENV_FILE, "rb") as f:
+                config_files[".env"] = f.read()
+        if os.path.exists(COMPOSE_FILE):
+            with open(COMPOSE_FILE, "rb") as f:
+                config_files["docker-compose.yml"] = f.read()
 
         # 上传到 B2
         _backup_progress = f"上传到 B2 (dump {common.format_size(len(dump_data))})..."
@@ -365,7 +384,7 @@ def run_restore_async(folder: str, mode: str = "full"):
 
 
 def _restore_worker(folder: str, mode: str):
-    """恢复工作线程。"""
+    """恢复工作线程。直接在 Web 容器内执行，无需 SSH。"""
     global _restore_running, _restore_progress, _restore_result
 
     try:
@@ -373,9 +392,6 @@ def _restore_worker(folder: str, mode: str):
 
         if not common.check_b2_config():
             _restore_result = {"ok": False, "error": "B2 配置不完整"}
-            return
-        if not common.check_vps_config():
-            _restore_result = {"ok": False, "error": "VPS SSH 配置不完整"}
             return
 
         # 确定备份文件夹
@@ -411,77 +427,53 @@ def _restore_worker(folder: str, mode: str):
             elif fname == "docker-compose.yml":
                 compose_data = data
 
-        vps_container = common.get_vps_container()
-        vps_db_user = common.get_vps_db_user()
-        vps_db_name = common.get_vps_db_name()
-        vps_project_dir = common.get_vps_project_dir()
-
         table_counts = {}
         restored_items = []
 
         # 恢复数据库
         if mode in ("full", "db") and dump_data:
-            _restore_progress = f"上传 dump 到 VPS ({common.format_size(len(dump_data))})..."
-            ssh = common.ssh_connect()
-            try:
-                remote_sql = "/tmp/xm_restore_dump.sql"
+            _restore_progress = f"写入 dump 文件 ({common.format_size(len(dump_data))})..."
+            restore_path = str(TMP_DIR / "xm_restore.sql")
 
-                if dump_is_gz:
-                    # 压缩文件：上传 .gz → gunzip → psql
-                    remote_gz = "/tmp/xm_restore_dump.sql.gz"
-                    common.sftp_write(ssh, remote_gz, dump_data)
-                    _restore_progress = "解压 dump..."
-                    exit_code, _, err = common.run_remote(ssh, f"gunzip -f {remote_gz}", timeout=120)
-                    if exit_code != 0:
-                        _restore_result = {"ok": False, "error": f"gunzip 失败: {err}"}
-                        return
-                else:
-                    # 未压缩文件：直接上传 .sql
-                    common.sftp_write(ssh, remote_sql, dump_data)
+            if dump_is_gz:
+                # 解压 gzip
+                _restore_progress = "解压 dump..."
+                decompressed = gzip.decompress(dump_data)
+                with open(restore_path, "wb") as f:
+                    f.write(decompressed)
+            else:
+                with open(restore_path, "wb") as f:
+                    f.write(dump_data)
 
-                _restore_progress = "执行 psql 恢复..."
-                restore_cmd = (
-                    f"docker exec -i {vps_container} "
-                    f"psql -U {vps_db_user} -d {vps_db_name} "
-                    f"< {remote_sql}"
-                )
-                exit_code, out, err = common.run_remote(ssh, restore_cmd, timeout=600)
-                common.run_remote(ssh, f"rm -f {remote_sql} {remote_sql}.gz")
+            _restore_progress = "执行 psql 恢复..."
+            exit_code, out, err = _psql_restore(restore_path)
+            os.remove(restore_path)
 
-                # 验证表行数
-                _restore_progress = "验证数据..."
-                for table in ["books", "audiobook_chapters", "global_settings", "xm_jobs", "xm_worker_stats", "xm_scrape_tasks"]:
-                    _, count, _ = common.run_remote(
-                        ssh,
-                        f"docker exec {vps_container} psql -U {vps_db_user} -d {vps_db_name} -t -c \"SELECT count(*) FROM {table};\"",
-                        timeout=30,
-                    )
-                    table_counts[table] = int(count.strip()) if count and count.strip().isdigit() else 0
+            # 验证表行数
+            _restore_progress = "验证数据..."
+            for table in ["books", "audiobook_chapters", "global_settings", "xm_jobs", "xm_worker_stats", "xm_scrape_tasks"]:
+                table_counts[table] = _count_table(table)
 
-                restored_items.append("数据库")
-            finally:
-                ssh.close()
+            restored_items.append("数据库")
 
         # 恢复配置文件
         if mode in ("full", "config") and (env_data or compose_data):
             _restore_progress = "恢复配置文件..."
-            ssh = common.ssh_connect()
-            try:
-                backup_ts = common.timestamp_str()
-                remote_env = f"{vps_project_dir}/.env"
-                remote_compose = f"{vps_project_dir}/docker-compose.yml"
+            backup_ts = common.timestamp_str()
 
-                if env_data:
-                    common.run_remote(ssh, f"cp {remote_env} {remote_env}.bak_{backup_ts} 2>/dev/null; true")
-                    common.sftp_write(ssh, remote_env, env_data)
-                    restored_items.append(".env")
+            if env_data:
+                # .env 通过 Docker volume 挂载为 ro，需要写入宿主机路径
+                # 但 /app/.env 是 ro 挂载，写不了。写入 backups 目录作为备份。
+                env_backup = str(TMP_DIR / f".env.restored_{backup_ts}")
+                with open(env_backup, "wb") as f:
+                    f.write(env_data)
+                restored_items.append(f".env (已保存到 {env_backup}，需手动替换)")
 
-                if compose_data:
-                    common.run_remote(ssh, f"cp {remote_compose} {remote_compose}.bak_{backup_ts} 2>/dev/null; true")
-                    common.sftp_write(ssh, remote_compose, compose_data)
-                    restored_items.append("docker-compose.yml")
-            finally:
-                ssh.close()
+            if compose_data:
+                compose_backup = str(TMP_DIR / f"docker-compose.yml.restored_{backup_ts}")
+                with open(compose_backup, "wb") as f:
+                    f.write(compose_data)
+                restored_items.append(f"docker-compose.yml (已保存到 {compose_backup}，需手动替换)")
 
         _restore_result = {
             "ok": True,

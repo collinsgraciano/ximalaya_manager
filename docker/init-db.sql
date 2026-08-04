@@ -177,10 +177,6 @@ INSERT INTO public.global_settings (setting_key, setting_value, description, is_
     ('B2_ACCESS_KEY_ID', '', 'B2 App Key ID', true),
     ('B2_SECRET_ACCESS_KEY', '', 'B2 App Key (applicationKey)', true),
     ('B2_BUCKET', 'xm-backups', 'B2 Bucket 名称', false),
-    ('VPS_HOST', '117.55.234.219', 'VPS SSH 主机地址', false),
-    ('VPS_PORT', '22', 'VPS SSH 端口', false),
-    ('VPS_USER', 'root', 'VPS SSH 用户名', false),
-    ('VPS_PASS', '', 'VPS SSH 密码', true),
     ('BACKUP_KEEP', '7', '保留备份数量', false),
     ('BACKUP_INTERVAL_HOURS', '24', '定时备份间隔（小时）', false)
 ON CONFLICT (setting_key) DO NOTHING;
