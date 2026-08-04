@@ -284,6 +284,10 @@ def _backup_worker():
 
         ts = common.timestamp_str()
 
+        # 清理上次残留的临时文件
+        for stale in TMP_DIR.glob("xm_dump.sql*"):
+            stale.unlink()
+
         # pg_dump 直接导出到本地持久化目录
         _backup_progress = "导出数据库 (pg_dump)..."
         dump_path = str(TMP_DIR / "xm_dump.sql")
@@ -442,6 +446,10 @@ def _restore_worker(folder: str, mode: str):
 
         # 恢复数据库
         if mode in ("full", "db") and dump_data:
+            # 清理上次残留的临时文件
+            for stale in TMP_DIR.glob("xm_restore.sql*"):
+                stale.unlink()
+
             _restore_progress = f"写入 dump 文件 ({common.format_size(len(dump_data))})..."
             restore_path = str(TMP_DIR / "xm_restore.sql")
 
