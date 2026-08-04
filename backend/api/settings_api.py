@@ -1,11 +1,12 @@
-"""全局设置 API。"""
+"""全局设置 API + 数据清理 API。"""
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from pydantic import BaseModel
 from psycopg import sql
 from ..database import fetch_all, execute
+from ..services.cleanup_service import cleanup_old_jobs, get_cleanup_stats
 
 router = APIRouter(prefix="/api", tags=["settings"])
 
@@ -73,3 +74,20 @@ def delete_setting(key: str):
         (key,),
     )
     return {"ok": True, "deleted": rowcount}
+
+
+# ═══════════════════════════════════════════
+# 数据清理
+# ═══════════════════════════════════════════
+
+@router.get("/cleanup/stats")
+def cleanup_stats():
+    """获取可清理的历史记录统计。"""
+    return get_cleanup_stats()
+
+
+@router.post("/cleanup/old-jobs")
+def cleanup_jobs(days: int = Query(30, ge=1, le=365)):
+    """删除 days 天前已完成/失败的任务和采集记录。"""
+    result = cleanup_old_jobs(days)
+    return {"ok": True, **result}

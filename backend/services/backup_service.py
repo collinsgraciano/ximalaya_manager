@@ -669,6 +669,15 @@ def _schedule_worker(interval_hours: float):
 
             _schedule_last_run = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+            # 备份完成后自动清理 30 天前的历史任务记录
+            try:
+                from .cleanup_service import cleanup_old_jobs
+                cleanup_result = cleanup_old_jobs(30)
+                if cleanup_result["jobs"] or cleanup_result["scrape_tasks"]:
+                    logger.info(f"自动清理历史记录: {cleanup_result}")
+            except Exception as e:
+                logger.warning(f"自动清理历史记录失败: {e}")
+
         # 计算下次运行时间
         from datetime import timedelta
         next_dt = datetime.now() + timedelta(hours=interval_hours)

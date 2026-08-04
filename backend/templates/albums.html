@@ -426,9 +426,9 @@ async function loadAlbums(page) {
         const data = await api(`/api/albums?page=${page}&page_size=20&category=${category}&status=${status}&finished=${finished}&search=${encodeURIComponent(search)}`);
         const albums = data.albums || [];
         const html = albums.map(a => {
-            const cover = (a.book_data && a.book_data.albumCover) || '';
+            const cover = a.album_cover || '';
             const coverHtml = cover ? `<img src="${cover}" class="album-cover">` : '<div class="album-cover bg-light"></div>';
-            const isFinished = a.book_data && a.book_data.isFinished;
+            const isFinished = a.is_finished;
             const finishedBadge = isFinished == 2
                 ? '<span class="badge bg-success">完本</span>'
                 : '<span class="badge bg-secondary">未完本</span>';

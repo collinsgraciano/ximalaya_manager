@@ -823,31 +823,11 @@ def scrape_album_tracks(book_id: str, proxies: dict | None = None) -> dict:
 
     saved_count = len(batch_params)
 
-    # 更新 books 表的 total_chapters 和 book_data.chapters
-    book_row = fetch_one("SELECT book_data FROM public.books WHERE book_id = %s", (book_id,))
-    if book_row and book_row.get("book_data"):
-        book_data = book_row["book_data"]
-        if isinstance(book_data, str):
-            book_data = json.loads(book_data)
-        book_data["chapters"] = [
-            {
-                "chapterId": str(t["trackId"]),
-                "chapterName": t["title"],
-                "mp3Url": f"https://www.ximalaya.com/sound/{t['trackId']}",
-                "orderNo": t.get("orderNo", 0),
-                "duration": t.get("duration", 0),
-            }
-            for t in tracks
-        ]
-        execute(
-            sql.SQL("UPDATE public.books SET total_chapters = %s, book_data = %s, updated_at = now() WHERE book_id = %s"),
-            (len(tracks), Jsonb(book_data), book_id),
-        )
-    else:
-        execute(
-            sql.SQL("UPDATE public.books SET total_chapters = %s, updated_at = now() WHERE book_id = %s"),
-            (len(tracks), book_id),
-        )
+    # 只更新 total_chapters，章节数据已正规化存储在 audiobook_chapters 表中
+    execute(
+        sql.SQL("UPDATE public.books SET total_chapters = %s, updated_at = now() WHERE book_id = %s"),
+        (len(tracks), book_id),
+    )
 
     return {
         "ok": True,
@@ -895,7 +875,10 @@ def get_albums(page: int = 1, page_size: int = 20, category: str = "",
     # 分页
     offset = (page - 1) * page_size
     rows = fetch_all(
-        sql.SQL("SELECT book_id, book_name, author, category, total_chapters, book_data, book_status, updated_at "
+        sql.SQL("SELECT book_id, book_name, author, category, total_chapters, "
+                "book_data->>'albumCover' AS album_cover, "
+                "book_data->>'isFinished' AS is_finished, "
+                "book_status, updated_at "
                 "FROM public.books{} ORDER BY updated_at DESC LIMIT %s OFFSET %s").format(
             sql.SQL(where_clause)
         ),

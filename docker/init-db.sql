@@ -74,8 +74,6 @@ COMMENT ON COLUMN public.audiobook_chapters.worker_id IS '认领此章节的 Wor
 COMMENT ON COLUMN public.audiobook_chapters.claimed_at IS 'Worker 认领此章节的时间戳';
 COMMENT ON COLUMN public.audiobook_chapters.error_message IS '上传失败时的错误信息记录';
 
-CREATE INDEX IF NOT EXISTS idx_audiobook_chapters_book_id ON public.audiobook_chapters(book_id);
-CREATE INDEX IF NOT EXISTS idx_audiobook_chapters_audio_url ON public.audiobook_chapters(book_id, audio_url);
 CREATE INDEX IF NOT EXISTS idx_audiobook_chapters_upload_status ON public.audiobook_chapters(upload_status);
 CREATE INDEX IF NOT EXISTS idx_chapters_book_status ON public.audiobook_chapters(book_id, upload_status);
 
