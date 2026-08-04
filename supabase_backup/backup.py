@@ -2,7 +2,7 @@
 """ximalaya_manager B2 定时备份脚本。
 
 功能:
-  1. SSH 到 VPS, pg_dump 导出完整数据库 (gzip 压缩)
+  1. SSH 到 VPS, pg_dump 导出完整数据库
   2. 下载 .env + docker-compose.yml 配置文件
   3. 上传所有文件到 Backblaze B2 (时间戳文件夹)
   4. 自动清理旧备份
@@ -63,7 +63,7 @@ def do_backup() -> bool:
     b2_bucket = get_b2_bucket()
     backup_keep = get_backup_keep()
 
-    remote_dump_gz = "/tmp/xm_b2_dump.sql.gz"
+    remote_dump = "/tmp/xm_b2_dump.sql"
     remote_env = f"{vps_project_dir}/.env"
     remote_compose = f"{vps_project_dir}/docker-compose.yml"
 
@@ -92,7 +92,7 @@ def do_backup() -> bool:
         f"docker exec {vps_container} "
         f"pg_dump -U {vps_db_user} -d {vps_db_name} "
         f"--no-owner --no-privileges --clean --if-exists "
-        f"| gzip > {remote_dump_gz}"
+        f"> {remote_dump}"
     )
     exit_code, out, err = run_remote(ssh, dump_cmd, timeout=300)
     if exit_code != 0:
@@ -102,17 +102,34 @@ def do_backup() -> bool:
         ssh.close()
         return False
 
-    _, size_out, _ = run_remote(ssh, f"stat -c%s {remote_dump_gz} 2>/dev/null || echo 0")
+    _, size_out, _ = run_remote(ssh, f"stat -c%s {remote_dump} 2>/dev/null || echo 0")
     dump_bytes_remote = int(size_out) if size_out.strip().isdigit() else 0
     print(f"  OK: 远程 dump {format_size(dump_bytes_remote)}", flush=True)
 
+    # 超过 1GB 则压缩（B2 免费版每日下载 1GB 限额）
+    COMPRESS_THRESHOLD = 1024 * 1024 * 1024  # 1GB
+    if dump_bytes_remote > COMPRESS_THRESHOLD:
+        print(f"  dump > 1GB，压缩中...", flush=True)
+        exit_code, _, err = run_remote(ssh, f"gzip -f {remote_dump}", timeout=300)
+        if exit_code != 0:
+            print(f"  FAIL: gzip 失败: {err}", flush=True)
+            ssh.close()
+            return False
+        remote_file = remote_dump + ".gz"
+        b2_name = "db_dump.sql.gz"
+        b2_ct = "application/gzip"
+    else:
+        remote_file = remote_dump
+        b2_name = "db_dump.sql"
+        b2_ct = "application/sql"
+
     # 下载 dump
     print("  下载中 ...", flush=True)
-    dump_gz = sftp_read(ssh, remote_dump_gz)
-    print(f"  OK: 已下载 ({format_size(len(dump_gz))})", flush=True)
+    dump_data = sftp_read(ssh, remote_file)
+    print(f"  OK: 已下载 ({format_size(len(dump_data))})", flush=True)
 
     # 清理远程临时文件
-    run_remote(ssh, f"rm -f {remote_dump_gz}")
+    run_remote(ssh, f"rm -f {remote_dump} {remote_dump}.gz")
 
     # ── Step 2: 下载配置文件 ──
     print("\n=== 2/3 下载配置文件 ===", flush=True)
@@ -132,8 +149,8 @@ def do_backup() -> bool:
     storage_prefix = ts
     all_uploaded = True
 
-    if upload_to_b2(f"{storage_prefix}/db_dump.sql.gz", dump_gz, "application/gzip"):
-        print(f"  OK: db_dump.sql.gz ({format_size(len(dump_gz))})", flush=True)
+    if upload_to_b2(f"{storage_prefix}/{b2_name}", dump_data, b2_ct):
+        print(f"  OK: {b2_name} ({format_size(len(dump_data))})", flush=True)
     else:
         all_uploaded = False
 
@@ -160,7 +177,7 @@ def do_backup() -> bool:
     print(f"\n=== 备份完成 ===", flush=True)
     print(f"  时间戳: {ts}", flush=True)
     print(f"  B2 路径: {b2_bucket}/{storage_prefix}/", flush=True)
-    print(f"  数据库 dump: {format_size(len(dump_gz))}", flush=True)
+    print(f"  数据库 dump: {format_size(len(dump_data))}", flush=True)
     if config_files:
         print(f"  配置文件: {', '.join(config_files.keys())}", flush=True)
     print(f"\nDone!", flush=True)

@@ -117,8 +117,13 @@ def cmd_download(folder: str):
 # 恢复数据库到 VPS
 # ═══════════════════════════════════════════
 
-def restore_database_to_vps(dump_gz_bytes: bytes) -> bool:
-    """将 gzipped SQL dump 恢复到 VPS PostgreSQL。"""
+def restore_database_to_vps(dump_bytes: bytes, is_gz: bool = False) -> bool:
+    """将 SQL dump 恢复到 VPS PostgreSQL。
+
+    Args:
+        dump_bytes: dump 文件内容
+        is_gz: 是否为 gzip 压缩文件
+    """
     print("\n--- 恢复数据库到 VPS ---", flush=True)
 
     vps_container = get_vps_container()
@@ -132,17 +137,20 @@ def restore_database_to_vps(dump_gz_bytes: bytes) -> bool:
         return False
 
     try:
-        remote_restore_gz = "/tmp/xm_restore_dump.sql.gz"
         remote_restore_sql = "/tmp/xm_restore_dump.sql"
 
-        print(f"  上传 dump ({format_size(len(dump_gz_bytes))}) ...", flush=True)
-        sftp_write(ssh, remote_restore_gz, dump_gz_bytes)
-
-        print("  解压 ...", flush=True)
-        exit_code, out, err = run_remote(ssh, f"gunzip -f {remote_restore_gz}", timeout=60)
-        if exit_code != 0:
-            print(f"  FAIL: gunzip 失败: {err}", flush=True)
-            return False
+        if is_gz:
+            remote_gz = "/tmp/xm_restore_dump.sql.gz"
+            print(f"  上传 dump ({format_size(len(dump_bytes))}) ...", flush=True)
+            sftp_write(ssh, remote_gz, dump_bytes)
+            print("  解压 ...", flush=True)
+            exit_code, _, err = run_remote(ssh, f"gunzip -f {remote_gz}", timeout=120)
+            if exit_code != 0:
+                print(f"  FAIL: gunzip 失败: {err}", flush=True)
+                return False
+        else:
+            print(f"  上传 dump ({format_size(len(dump_bytes))}) ...", flush=True)
+            sftp_write(ssh, remote_restore_sql, dump_bytes)
 
         print("  执行 psql 恢复 ...", flush=True)
         restore_cmd = (
@@ -165,7 +173,7 @@ def restore_database_to_vps(dump_gz_bytes: bytes) -> bool:
         else:
             print("  OK: 数据库恢复成功", flush=True)
 
-        run_remote(ssh, f"rm -f {remote_restore_sql}")
+        run_remote(ssh, f"rm -f {remote_restore_sql} {remote_restore_sql}.gz")
 
         print("\n  验证数据:", flush=True)
         tables = ["books", "audiobook_chapters", "global_settings", "xm_jobs", "xm_worker_stats", "xm_scrape_tasks"]
@@ -259,29 +267,33 @@ def cmd_restore(folder: str = None, db_only: bool = False, config_only: bool = F
         print("ERROR: 下载失败", flush=True)
         return
 
-    dump_gz_bytes = None
+    dump_bytes = None
+    dump_is_gz = False
     env_bytes = None
     compose_bytes = None
 
-    if "db_dump.sql.gz" in downloaded:
-        dump_gz_bytes = downloaded["db_dump.sql.gz"].read_bytes()
+    if "db_dump.sql" in downloaded:
+        dump_bytes = downloaded["db_dump.sql"].read_bytes()
+    elif "db_dump.sql.gz" in downloaded:
+        dump_bytes = downloaded["db_dump.sql.gz"].read_bytes()
+        dump_is_gz = True
     if ".env" in downloaded:
         env_bytes = downloaded[".env"].read_bytes()
     if "docker-compose.yml" in downloaded:
         compose_bytes = downloaded["docker-compose.yml"].read_bytes()
 
     if db_only:
-        if dump_gz_bytes:
-            restore_database_to_vps(dump_gz_bytes)
+        if dump_bytes:
+            restore_database_to_vps(dump_bytes, is_gz=dump_is_gz)
         else:
-            print("ERROR: 备份中没有 db_dump.sql.gz", flush=True)
+            print("ERROR: 备份中没有 db_dump.sql 或 db_dump.sql.gz", flush=True)
     elif config_only:
         restore_config_to_vps(env_bytes, compose_bytes)
     else:
-        if dump_gz_bytes:
-            restore_database_to_vps(dump_gz_bytes)
+        if dump_bytes:
+            restore_database_to_vps(dump_bytes, is_gz=dump_is_gz)
         else:
-            print("WARN: 备份中没有 db_dump.sql.gz，跳过数据库恢复", flush=True)
+            print("WARN: 备份中没有 db_dump.sql 或 db_dump.sql.gz，跳过数据库恢复", flush=True)
 
         if env_bytes or compose_bytes:
             restore_config_to_vps(env_bytes, compose_bytes)

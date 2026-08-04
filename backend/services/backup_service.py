@@ -230,7 +230,7 @@ def _backup_worker():
         vps_db_name = common.get_vps_db_name()
         vps_project_dir = common.get_vps_project_dir()
 
-        remote_dump_gz = "/tmp/xm_b2_dump.sql.gz"
+        remote_dump = "/tmp/xm_b2_dump.sql"
         remote_env = f"{vps_project_dir}/.env"
         remote_compose = f"{vps_project_dir}/docker-compose.yml"
 
@@ -241,13 +241,14 @@ def _backup_worker():
             _backup_result = {"ok": False, "error": f"SSH 连接失败: {e}"}
             return
 
-        # pg_dump
+        # pg_dump (不压缩，节省 VPS CPU)
         _backup_progress = "导出数据库 (pg_dump)..."
+        remote_dump = "/tmp/xm_b2_dump.sql"
         dump_cmd = (
             f"docker exec {vps_container} "
             f"pg_dump -U {vps_db_user} -d {vps_db_name} "
             f"--no-owner --no-privileges --clean --if-exists "
-            f"| gzip > {remote_dump_gz}"
+            f"> {remote_dump}"
         )
         exit_code, out, err = common.run_remote(ssh, dump_cmd, timeout=300)
         if exit_code != 0:
@@ -255,12 +256,32 @@ def _backup_worker():
             _backup_result = {"ok": False, "error": f"pg_dump 失败: {err[:200]}"}
             return
 
-        _, size_out, _ = common.run_remote(ssh, f"stat -c%s {remote_dump_gz} 2>/dev/null || echo 0")
+        _, size_out, _ = common.run_remote(ssh, f"stat -c%s {remote_dump} 2>/dev/null || echo 0")
         dump_size = int(size_out) if size_out.strip().isdigit() else 0
 
-        _backup_progress = f"下载 dump ({common.format_size(dump_size)})..."
-        dump_gz = common.sftp_read(ssh, remote_dump_gz)
-        common.run_remote(ssh, f"rm -f {remote_dump_gz}")
+        # 超过 1GB 则压缩（B2 免费版每日下载 1GB 限额）
+        COMPRESS_THRESHOLD = 1024 * 1024 * 1024  # 1GB
+        if dump_size > COMPRESS_THRESHOLD:
+            _backup_progress = f"dump {common.format_size(dump_size)} > 1GB，压缩中..."
+            exit_code, _, err = common.run_remote(ssh, f"gzip -f {remote_dump}", timeout=300)
+            if exit_code != 0:
+                ssh.close()
+                _backup_result = {"ok": False, "error": f"gzip 失败: {err}"}
+                return
+            remote_file = remote_dump + ".gz"
+            b2_name = "db_dump.sql.gz"
+            b2_ct = "application/gzip"
+        else:
+            remote_file = remote_dump
+            b2_name = "db_dump.sql"
+            b2_ct = "application/sql"
+
+        _, size_out2, _ = common.run_remote(ssh, f"stat -c%s {remote_file} 2>/dev/null || echo 0")
+        final_size = int(size_out2) if size_out2.strip().isdigit() else 0
+
+        _backup_progress = f"下载 dump ({common.format_size(final_size)})..."
+        dump_data = common.sftp_read(ssh, remote_file)
+        common.run_remote(ssh, f"rm -f {remote_dump} {remote_dump}.gz")
 
         # 下载配置文件
         _backup_progress = "下载配置文件..."
@@ -274,13 +295,13 @@ def _backup_worker():
         ssh.close()
 
         # 上传到 B2
-        _backup_progress = f"上传到 B2 (dump {common.format_size(len(dump_gz))})..."
+        _backup_progress = f"上传到 B2 (dump {common.format_size(len(dump_data))})..."
         storage_prefix = ts
         uploaded_files = []
         all_ok = True
 
-        if common.upload_to_b2(f"{storage_prefix}/db_dump.sql.gz", dump_gz, "application/gzip"):
-            uploaded_files.append({"name": "db_dump.sql.gz", "size": len(dump_gz)})
+        if common.upload_to_b2(f"{storage_prefix}/{b2_name}", dump_data, b2_ct):
+            uploaded_files.append({"name": b2_name, "size": len(dump_data)})
         else:
             all_ok = False
 
@@ -371,7 +392,8 @@ def _restore_worker(folder: str, mode: str):
             _restore_result = {"ok": False, "error": f"备份 {folder} 中没有文件"}
             return
 
-        dump_gz = None
+        dump_data = None
+        dump_is_gz = False
         env_data = None
         compose_data = None
 
@@ -379,8 +401,11 @@ def _restore_worker(folder: str, mode: str):
             data = common.download_from_b2(f"{folder}/{fname}")
             if data is None:
                 continue
-            if fname == "db_dump.sql.gz":
-                dump_gz = data
+            if fname == "db_dump.sql":
+                dump_data = data
+            elif fname == "db_dump.sql.gz":
+                dump_data = data
+                dump_is_gz = True
             elif fname == ".env":
                 env_data = data
             elif fname == "docker-compose.yml":
@@ -395,20 +420,24 @@ def _restore_worker(folder: str, mode: str):
         restored_items = []
 
         # 恢复数据库
-        if mode in ("full", "db") and dump_gz:
-            _restore_progress = f"上传 dump 到 VPS ({common.format_size(len(dump_gz))})..."
+        if mode in ("full", "db") and dump_data:
+            _restore_progress = f"上传 dump 到 VPS ({common.format_size(len(dump_data))})..."
             ssh = common.ssh_connect()
             try:
-                remote_gz = "/tmp/xm_restore_dump.sql.gz"
                 remote_sql = "/tmp/xm_restore_dump.sql"
 
-                common.sftp_write(ssh, remote_gz, dump_gz)
-
-                _restore_progress = "解压 dump..."
-                exit_code, out, err = common.run_remote(ssh, f"gunzip -f {remote_gz}", timeout=60)
-                if exit_code != 0:
-                    _restore_result = {"ok": False, "error": f"gunzip 失败: {err}"}
-                    return
+                if dump_is_gz:
+                    # 压缩文件：上传 .gz → gunzip → psql
+                    remote_gz = "/tmp/xm_restore_dump.sql.gz"
+                    common.sftp_write(ssh, remote_gz, dump_data)
+                    _restore_progress = "解压 dump..."
+                    exit_code, _, err = common.run_remote(ssh, f"gunzip -f {remote_gz}", timeout=120)
+                    if exit_code != 0:
+                        _restore_result = {"ok": False, "error": f"gunzip 失败: {err}"}
+                        return
+                else:
+                    # 未压缩文件：直接上传 .sql
+                    common.sftp_write(ssh, remote_sql, dump_data)
 
                 _restore_progress = "执行 psql 恢复..."
                 restore_cmd = (
@@ -417,7 +446,7 @@ def _restore_worker(folder: str, mode: str):
                     f"< {remote_sql}"
                 )
                 exit_code, out, err = common.run_remote(ssh, restore_cmd, timeout=600)
-                common.run_remote(ssh, f"rm -f {remote_sql}")
+                common.run_remote(ssh, f"rm -f {remote_sql} {remote_sql}.gz")
 
                 # 验证表行数
                 _restore_progress = "验证数据..."
