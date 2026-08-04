@@ -163,11 +163,20 @@ def _init_common_config():
 # 本地操作（Web 容器内直接执行，无需 SSH）
 # ═══════════════════════════════════════════
 
-# 数据库连接信息（Docker 内部网络）
-DB_HOST = os.environ.get("DB_HOST", "postgres")
-DB_PORT = os.environ.get("DB_PORT", "5432")
-DB_USER = os.environ.get("VPS_DB_USER", os.environ.get("POSTGRES_USER", "xm_app"))
-DB_NAME = os.environ.get("VPS_DB_NAME", os.environ.get("POSTGRES_DB", "ximalaya"))
+# 数据库连接信息（从 DATABASE_URL 解析，与 Web 应用使用同一连接）
+from urllib.parse import urlparse as _urlparse
+_dsn = os.environ.get("DATABASE_URL", "")
+if _dsn.startswith("postgresql+psycopg://"):
+    _dsn = _dsn.replace("postgresql+psycopg://", "postgresql://", 1)
+_parsed = _urlparse(_dsn)
+DB_HOST = _parsed.hostname or "postgres"
+DB_PORT = str(_parsed.port or 5432)
+DB_USER = _parsed.username or "xm_app"
+DB_PASSWORD = _parsed.password or ""
+DB_NAME = _parsed.path.lstrip("/") or "ximalaya"
+
+# pg_dump / psql 需要 PGPASSWORD 环境变量
+_pg_env = {**os.environ, "PGPASSWORD": DB_PASSWORD}
 
 # 配置文件路径（通过 Docker volume 挂载）
 ENV_FILE = "/app/.env"
@@ -189,7 +198,7 @@ def _pg_dump_to_file(filepath: str) -> int:
         "--clean", "--if-exists",
         "-f", filepath,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=_pg_env)
     if result.returncode != 0:
         raise RuntimeError(f"pg_dump 失败: {result.stderr[:300]}")
     return os.path.getsize(filepath)
@@ -203,6 +212,7 @@ def _psql_restore(filepath: str) -> tuple[int, str, str]:
             stdin=f,
             capture_output=True,
             timeout=600,
+            env=_pg_env,
         )
     return result.returncode, result.stdout.decode("utf-8", errors="replace"), result.stderr.decode("utf-8", errors="replace")
 
