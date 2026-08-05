@@ -68,7 +68,16 @@ def main():
         print(line)
     print(f"Exit: {exit_status}")
 
-    # Step 4: Rebuild web container (DOCKER_BUILDKIT=0 forces serial stage execution)
+    # Step 4: Clean up leftover build containers from previous interrupted builds
+    print("\n=== Cleaning up leftover build containers ===")
+    stdin, stdout, stderr = ssh.exec_command(
+        "docker ps -a --filter 'ancestor=1c06f14f1f45' --filter 'status=running' -q | xargs -r docker stop 2>/dev/null; "
+        "docker ps -a --filter 'ancestor=1c06f14f1f45' -q | xargs -r docker rm 2>/dev/null; "
+        "echo done"
+    )
+    print(stdout.read().decode("utf-8", errors="replace").strip())
+
+    # Step 5: Rebuild web container (DOCKER_BUILDKIT=0 forces serial stage execution)
     # BuildKit 并行执行多阶段 apt-get 会导致 1GB VPS OOM; 串行构建安全且保留缓存
     print("\n=== Rebuilding web container (BuildKit disabled — serial, cached) ===")
     stdin, stdout, stderr = ssh.exec_command(
