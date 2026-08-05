@@ -165,6 +165,12 @@ def api_reset_job(job_id: int):
     return reset_job(job_id)
 
 
+@router.delete("/jobs/all")
+def api_delete_all_jobs():
+    """删除所有任务。"""
+    return delete_all_jobs()
+
+
 @router.delete("/jobs/{job_id}")
 def api_delete_job(job_id: int):
     """删除任务（Web UI 用，不删除专辑和已上传章节）。"""
@@ -191,12 +197,6 @@ def api_batch_reset_jobs(req: BatchJobIds):
 def api_delete_jobs_by_status(status: str):
     """按状态删除所有匹配的任务。"""
     return delete_jobs_by_status(status)
-
-
-@router.delete("/jobs/all")
-def api_delete_all_jobs():
-    """删除所有任务。"""
-    return delete_all_jobs()
 
 
 @router.post("/jobs/status/{status}/reset")
