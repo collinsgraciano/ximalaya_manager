@@ -952,6 +952,24 @@ def delete_jobs_by_status(status: str) -> dict:
     return delete_jobs_batch(job_ids)
 
 
+def delete_all_jobs() -> dict:
+    """删除所有任务（不删除专辑和已上传章节）。"""
+    rows = fetch_all(
+        sql.SQL("SELECT DISTINCT book_id FROM public.xm_jobs"),
+    )
+    count = execute(sql.SQL("DELETE FROM public.xm_jobs"))
+    for row in (rows or []):
+        execute(
+            sql.SQL("""
+                UPDATE public.audiobook_chapters
+                SET worker_id = NULL, claimed_at = NULL
+                WHERE book_id = %s AND upload_status != 'uploaded'
+            """),
+            (row["book_id"],),
+        )
+    return {"ok": True, "deleted": count}
+
+
 def reset_jobs_by_status(status: str) -> dict:
     """按状态重置所有匹配的任务为 pending。"""
     rows = fetch_all(

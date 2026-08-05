@@ -32,6 +32,10 @@
         <button class="btn btn-sm btn-outline-secondary" onclick="resetByStatus('processing')" title="重置所有处理中任务">
             <i class="bi bi-arrow-clockwise"></i> 重置处理中
         </button>
+        <div class="vr"></div>
+        <button class="btn btn-sm btn-outline-danger" onclick="deleteAllJobs()" title="删除所有任务">
+            <i class="bi bi-trash"></i> 删除全部任务
+        </button>
         <span class="text-muted small ms-auto" id="selected-count"></span>
     </div>
 </div>
@@ -260,6 +264,22 @@ async function resetByStatus(status) {
         }
     } catch (e) {
         showToast('批量重置失败: ' + e.message, 'danger');
+    }
+}
+
+async function deleteAllJobs() {
+    if (!confirm('确定删除所有任务？此操作不可撤销！')) return;
+    if (!confirm('再次确认：所有任务将被删除，已上传的章节不受影响。')) return;
+    try {
+        const data = await api('/api/jobs/all', { method: 'DELETE' });
+        if (data.ok) {
+            showToast(`已删除 ${data.deleted} 个任务`, 'success');
+            loadJobs(1);
+        } else {
+            showToast('删除失败', 'danger');
+        }
+    } catch (e) {
+        showToast('删除失败: ' + e.message, 'danger');
     }
 }
 

@@ -20,6 +20,7 @@ from ..services.job_service import (
     reset_jobs_batch,
     delete_jobs_by_status,
     reset_jobs_by_status,
+    delete_all_jobs,
 )
 from ..database import fetch_all, fetch_one
 
@@ -190,6 +191,12 @@ def api_batch_reset_jobs(req: BatchJobIds):
 def api_delete_jobs_by_status(status: str):
     """按状态删除所有匹配的任务。"""
     return delete_jobs_by_status(status)
+
+
+@router.delete("/jobs/all")
+def api_delete_all_jobs():
+    """删除所有任务。"""
+    return delete_all_jobs()
 
 
 @router.post("/jobs/status/{status}/reset")
