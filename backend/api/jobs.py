@@ -236,6 +236,7 @@ def api_config(worker_id: str = Query("")):
             "deepfilter_model": settings_map.get("DEEPFILTER_MODEL", "DeepFilterNet2"),
             "deepfilter_segment_minutes": int(settings_map.get("DEEPFILTER_SEGMENT_MINUTES", "60")),
             "download_interval": float(settings_map.get("DOWNLOAD_INTERVAL", "1.5")),
+            "download_retries": int(settings_map.get("DOWNLOAD_RETRIES", "10")),
             "tg_serial_upload": settings_map.get("TG_SERIAL_UPLOAD", "true").lower() == "true",
             "tg_upload_interval": float(settings_map.get("TG_UPLOAD_INTERVAL", "3")),
             "proxy_enabled": settings_map.get("PROXY_ENABLED", "false").lower() == "true",

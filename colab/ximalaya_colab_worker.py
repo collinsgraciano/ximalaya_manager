@@ -321,8 +321,8 @@ class ColabWorker:
             # 音质优先级
             quality_priority = parse_quality_priority(self.config.get("audio_quality"))
 
-            # 下载: 代理失败时换代理重试 (最多 10 次)
-            download_retries = 10
+            # 下载: 代理失败时换代理重试
+            download_retries = int(self.config.get("download_retries", 10))
             status, file_size = "no_url", 0
             for dl_attempt in range(download_retries):
                 status, file_size = download_track(track_id, audio_path, headers=headers,

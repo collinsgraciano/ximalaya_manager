@@ -157,6 +157,7 @@ INSERT INTO public.global_settings (setting_key, setting_value, description, is_
     ('DEEPFILTER_MODEL', 'DeepFilterNet2', 'DeepFilter 降噪模型。可选: DeepFilterNet2(v2, 推荐速度快), DeepFilterNet3(v3, 质量最高), GTCRN(超轻量最快, 16kHz)', false),
     ('DEEPFILTER_SEGMENT_MINUTES', '60', 'DeepFilter 音频分片时长（分钟）', false),
     ('DOWNLOAD_INTERVAL', '1.5', '下载间隔秒数', false),
+    ('DOWNLOAD_RETRIES', '10', '下载失败时换代理重试次数', false),
     ('TG_SERIAL_UPLOAD', 'true', '是否串行上传到TG（避免限流）', false),
     ('TG_UPLOAD_INTERVAL', '3', 'TG上传间隔秒数', false),
     ('PROXY_ENABLED', 'false', '是否启用代理（采集和下载均通过代理）', false),
