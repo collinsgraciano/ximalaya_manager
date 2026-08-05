@@ -50,7 +50,14 @@ def main():
     stdin, stdout, stderr = ssh.exec_command(f"cd {PROJECT_DIR} && git pull origin main 2>&1")
     print(stdout.read().decode("utf-8", errors="replace").strip())
 
-    # Step 2: Re-run init-db.sql (idempotent)
+    # Step 2: Stop web container to free memory for build
+    print("\n=== Stopping web container (free memory for build) ===")
+    stdin, stdout, stderr = ssh.exec_command(
+        f"cd {PROJECT_DIR} && docker compose stop web 2>&1"
+    )
+    print(stdout.read().decode("utf-8", errors="replace").strip())
+
+    # Step 3: Re-run init-db.sql (idempotent)
     print("\n=== Re-running init-db.sql ===")
     stdin, stdout, stderr = ssh.exec_command(
         f"docker exec -i xm_postgres psql -U xm_app -d ximalaya < {PROJECT_DIR}/docker/init-db.sql 2>&1"
@@ -61,11 +68,16 @@ def main():
         print(line)
     print(f"Exit: {exit_status}")
 
-    # Step 3: Rebuild web container
-    print("\n=== Rebuilding web container ===")
+    # Step 4: Clean up dangling images/build cache to free disk+memory
+    print("\n=== Pruning docker build cache ===")
+    stdin, stdout, stderr = ssh.exec_command("docker system prune -f 2>&1")
+    print(stdout.read().decode("utf-8", errors="replace").strip())
+
+    # Step 5: Rebuild web container (DOCKER_BUILDKIT=0 forces serial stage execution)
+    print("\n=== Rebuilding web container (BuildKit disabled — serial build) ===")
     stdin, stdout, stderr = ssh.exec_command(
-        f"cd {PROJECT_DIR} && docker compose up -d --build web 2>&1",
-        timeout=180,
+        f"cd {PROJECT_DIR} && DOCKER_BUILDKIT=0 docker compose build --no-cache web 2>&1",
+        timeout=600,
     )
     while not stdout.channel.exit_status_ready():
         if stdout.channel.recv_ready():
@@ -78,11 +90,19 @@ def main():
     exit_status = stdout.channel.recv_exit_status()
     print(f"\nExit: {exit_status}")
 
-    # Step 4: Wait for health
+    # Step 6: Start web container
+    print("\n=== Starting web container ===")
+    stdin, stdout, stderr = ssh.exec_command(
+        f"cd {PROJECT_DIR} && docker compose up -d web 2>&1",
+        timeout=120,
+    )
+    print(stdout.read().decode("utf-8", errors="replace").strip())
+
+    # Step 7: Wait for health
     print("\nWaiting 15s for containers...")
     time.sleep(15)
 
-    # Step 5: Verify
+    # Step 8: Verify
     print("\n=== Health check ===")
     stdin, stdout, stderr = ssh.exec_command(f"curl -s http://localhost:{WEB_PORT}/api/system/health")
     print(stdout.read().decode("utf-8", errors="replace").strip())
