@@ -516,6 +516,12 @@ class ColabWorker:
             logger.info(f"任务 #{job_id} 已完成")
         return resp
 
+    def fail_job(self, job_id: int, error_message: str):
+        """标记任务失败。"""
+        resp = self._post(f"/api/jobs/{job_id}/fail", {"error_message": error_message})
+        logger.error(f"任务 #{job_id} 失败: {error_message}")
+        return resp
+
 
     def release_job(self):
         """退出时释放自己 processing 的任务。"""
@@ -529,14 +535,20 @@ class ColabWorker:
     # ─── 多线程并行处理章节 ───
 
     def process_chapters_parallel(self, job_id: int, chapters: list,
-                                  book_id: str) -> tuple[int, int]:
-        """多线程并行处理同一任务内的多个章节。"""
+                                  book_id: str) -> tuple[int, int, bool]:
+        """多线程并行处理同一任务内的多个章节。
+
+        返回 (success_count, fail_count, job_failed)。
+        job_failed=True 表示连续5章下载失败, 应标记任务失败。
+        """
         total = len(chapters)
         num_threads = min(self.num_workers, total)
         logger.info(f"  启动 {num_threads} 个线程并行处理 {total} 个章节")
 
         success_count = 0
         fail_count = 0
+        consecutive_failures = 0
+        job_failed = False
         pbar = tqdm(total=total, desc=f"Job #{job_id}", unit="ch") if tqdm else None
 
         def _process_one(idx: int, chapter: dict) -> tuple[dict, dict]:
@@ -565,14 +577,24 @@ class ColabWorker:
                     with self._counter_lock:
                         if result and result.get("ok"):
                             success_count += 1
+                            consecutive_failures = 0
                         else:
                             fail_count += 1
+                            consecutive_failures += 1
                         if pbar:
                             pbar.set_postfix_str(f"OK={success_count} FAIL={fail_count}")
+                    # 连续5章失败, 放弃整个任务
+                    if consecutive_failures >= 5 and not job_failed:
+                        job_failed = True
+                        logger.warning(f"连续 {consecutive_failures} 个章节下载失败, 放弃任务 #{job_id}")
+                        for f in futures:
+                            f.cancel()
+                        break
                 except Exception as e:
                     logger.error(f"  线程异常: {e}", exc_info=True)
                     with self._counter_lock:
                         fail_count += 1
+                        consecutive_failures += 1
                         if pbar:
                             pbar.set_postfix_str(f"OK={success_count} FAIL={fail_count}")
                 if pbar:
@@ -580,7 +602,7 @@ class ColabWorker:
 
         if pbar:
             pbar.close()
-        return success_count, fail_count
+        return success_count, fail_count, job_failed
 
     # ─── 主循环 ───
 
@@ -637,13 +659,15 @@ class ColabWorker:
 
                 if self.num_workers > 1:
                     # 多线程并行处理
-                    success_count, fail_count = self.process_chapters_parallel(
+                    success_count, fail_count, job_failed = self.process_chapters_parallel(
                         job_id, chapters, book_id
                     )
                 else:
                     # 单线程串行处理
                     success_count = 0
                     fail_count = 0
+                    consecutive_failures = 0
+                    job_failed = False
                     pbar = tqdm(chapters, desc=f"Job #{job_id}", unit="ch") if tqdm else None
                     for i, chapter in enumerate(chapters or []):
                         if self._job_lost.is_set():
@@ -657,12 +681,25 @@ class ColabWorker:
                         result = self.process_chapter(job_id, chapter, book_id)
                         if result and result.get("ok"):
                             success_count += 1
+                            consecutive_failures = 0
                         else:
                             fail_count += 1
+                            consecutive_failures += 1
+                            if consecutive_failures >= 5:
+                                job_failed = True
+                                logger.warning(f"连续 {consecutive_failures} 个章节下载失败, 放弃任务 #{job_id}")
+                                break
                         if pbar:
                             pbar.set_postfix_str(f"OK={success_count} FAIL={fail_count}")
                     if pbar:
                         pbar.close()
+
+                # 连续失败: 标记任务失败, 继续下一个
+                if job_failed:
+                    self.fail_job(job_id, f"连续 {consecutive_failures} 个章节下载失败")
+                    jobs_done += 1
+                    logger.info(f"任务 #{job_id} 已标记失败, 继续下一个任务")
+                    continue
 
                 # 标记任务完成
                 if fail_count == 0:

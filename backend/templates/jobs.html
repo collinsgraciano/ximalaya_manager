@@ -16,6 +16,7 @@
             <option value="">全部状态</option>
             <option value="pending">待处理</option>
             <option value="processing">处理中</option>
+            <option value="failed">失败</option>
             <option value="done">完成</option>
         </select>
         <div class="vr"></div>
@@ -31,6 +32,9 @@
         </button>
         <button class="btn btn-sm btn-outline-secondary" onclick="resetByStatus('processing')" title="重置所有处理中任务">
             <i class="bi bi-arrow-clockwise"></i> 重置处理中
+        </button>
+        <button class="btn btn-sm btn-outline-warning" onclick="resetByStatus('failed')" title="重置所有失败任务为待处理">
+            <i class="bi bi-arrow-clockwise"></i> 重置失败
         </button>
         <div class="vr"></div>
         <button class="btn btn-sm btn-outline-danger" onclick="deleteAllJobs()" title="删除所有任务">
@@ -254,7 +258,7 @@ async function deleteByStatus(status) {
 }
 
 async function resetByStatus(status) {
-    const label = { processing: '处理中', pending: '待处理' }[status] || status;
+    const label = { processing: '处理中', pending: '待处理', failed: '失败' }[status] || status;
     if (!confirm(`确定重置所有${label}任务为待处理？`)) return;
     try {
         const data = await api(`/api/jobs/status/${status}/reset`, { method: 'POST' });
