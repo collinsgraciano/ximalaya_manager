@@ -68,15 +68,11 @@ def main():
         print(line)
     print(f"Exit: {exit_status}")
 
-    # Step 4: Clean up dangling images/build cache to free disk+memory
-    print("\n=== Pruning docker build cache ===")
-    stdin, stdout, stderr = ssh.exec_command("docker system prune -f 2>&1")
-    print(stdout.read().decode("utf-8", errors="replace").strip())
-
-    # Step 5: Rebuild web container (DOCKER_BUILDKIT=0 forces serial stage execution)
-    print("\n=== Rebuilding web container (BuildKit disabled — serial build) ===")
+    # Step 4: Rebuild web container (DOCKER_BUILDKIT=0 forces serial stage execution)
+    # BuildKit 并行执行多阶段 apt-get 会导致 1GB VPS OOM; 串行构建安全且保留缓存
+    print("\n=== Rebuilding web container (BuildKit disabled — serial, cached) ===")
     stdin, stdout, stderr = ssh.exec_command(
-        f"cd {PROJECT_DIR} && DOCKER_BUILDKIT=0 docker compose build --no-cache web 2>&1",
+        f"cd {PROJECT_DIR} && DOCKER_BUILDKIT=0 docker compose build web 2>&1",
         timeout=600,
     )
     while not stdout.channel.exit_status_ready():
