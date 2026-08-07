@@ -490,6 +490,7 @@ class ColabWorker:
             elif not ok:
                 extra = f" err={resp.get('error', '未知错误')}"
             logger.info(f"  [{status_text}] 章节 {chapter_id}: {upload_status}{extra}")
+            resp["upload_status"] = upload_status
             return resp
         except Exception as e:
             logger.error(f"  上报失败: {e}")
@@ -575,7 +576,8 @@ class ColabWorker:
                 try:
                     chapter, result = future.result()
                     with self._counter_lock:
-                        if result and result.get("ok"):
+                        # ok=True 仅表示上报成功, 需检查 upload_status 是否真正 uploaded
+                        if result and result.get("ok") and result.get("upload_status") == "uploaded":
                             success_count += 1
                             consecutive_failures = 0
                         else:
@@ -679,7 +681,7 @@ class ColabWorker:
                         else:
                             logger.info(f"  [{i+1}/{total}] {ch_name}")
                         result = self.process_chapter(job_id, chapter, book_id)
-                        if result and result.get("ok"):
+                        if result and result.get("ok") and result.get("upload_status") == "uploaded":
                             success_count += 1
                             consecutive_failures = 0
                         else:
