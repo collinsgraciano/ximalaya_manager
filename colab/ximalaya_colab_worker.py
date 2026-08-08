@@ -604,7 +604,7 @@ class ColabWorker:
 
         if pbar:
             pbar.close()
-        return success_count, fail_count, job_failed
+        return success_count, fail_count, job_failed, consecutive_failures
 
     # ─── 主循环 ───
 
@@ -661,7 +661,7 @@ class ColabWorker:
 
                 if self.num_workers > 1:
                     # 多线程并行处理
-                    success_count, fail_count, job_failed = self.process_chapters_parallel(
+                    success_count, fail_count, job_failed, consecutive_failures = self.process_chapters_parallel(
                         job_id, chapters, book_id
                     )
                 else:
