@@ -602,13 +602,13 @@ def _save_schedule_state(enabled: bool, interval_hours: float):
     import json
     state = json.dumps({"enabled": enabled, "interval_hours": interval_hours})
     execute(
-        pg_sql.SQL("""
-            INSERT INTO public.global_settings (setting_key, setting_value, description, is_secret, updated_at)
-            VALUES ('BACKUP_SCHEDULE_STATE', %s, '定时备份开关状态（内部使用，JSON）', false, now())
-            ON CONFLICT (setting_key) DO UPDATE SET
-                setting_value = EXCLUDED.setting_value,
-                updated_at = now()
-        """),
+        """
+        INSERT INTO public.global_settings (setting_key, setting_value, description, is_secret, updated_at)
+        VALUES ('BACKUP_SCHEDULE_STATE', %s, '定时备份开关状态（内部使用，JSON）', false, now())
+        ON CONFLICT (setting_key) DO UPDATE SET
+            setting_value = EXCLUDED.setting_value,
+            updated_at = now()
+        """,
         (state,),
     )
 
@@ -643,6 +643,13 @@ def restore_schedule_on_startup():
             _schedule_thread.start()
     except Exception as e:
         logger.warning(f"恢复定时备份状态失败: {e}")
+        # 清理无效的状态值
+        try:
+            execute(
+                "DELETE FROM public.global_settings WHERE setting_key = 'BACKUP_SCHEDULE_STATE'"
+            )
+        except Exception:
+            pass
 
 
 def _schedule_worker(interval_hours: float):
