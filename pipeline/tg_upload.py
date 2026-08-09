@@ -7,6 +7,8 @@ import time
 import random
 import threading
 import logging
+import subprocess
+import tempfile
 import requests
 
 logger = logging.getLogger(__name__)
@@ -20,6 +22,79 @@ _UPLOAD_LOCK = threading.Lock()
 # Round-robin 计数器（多 Bot Token 轮换）
 _token_counter = 0
 _token_counter_lock = threading.Lock()
+
+
+def compress_audio_if_needed(file_path: str, max_size_mb: int = 48) -> tuple[str, bool]:
+    """如果音频文件超过 max_size_mb, 用 FFmpeg 降低码率压缩到限制以下。
+
+    返回 (文件路径, 是否为临时文件)。
+    - 不需要压缩: 返回 (原路径, False)
+    - 压缩成功: 返回 (临时文件路径, True), 调用方负责删除
+    """
+    file_size = os.path.getsize(file_path)
+    max_bytes = max_size_mb * 1024 * 1024
+
+    if file_size <= max_bytes:
+        return file_path, False
+
+    logger.info(f"[TG上传] 文件过大 ({file_size // 1024 // 1024}MB), "
+               f"开始压缩到 {max_size_mb}MB 以下...")
+
+    # 获取音频时长
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", file_path],
+            capture_output=True, text=True, check=True, timeout=60,
+        )
+        duration = float(r.stdout.strip())
+    except Exception as e:
+        logger.warning(f"[TG上传] 获取时长失败, 无法压缩: {e}")
+        return file_path, False
+
+    if duration <= 0:
+        logger.warning(f"[TG上传] 时长无效 ({duration}), 无法压缩")
+        return file_path, False
+
+    # 计算目标码率 (bits/s), 留 5% 余量给容器开销
+    target_bitrate = int(max_bytes * 8 / duration * 0.95)
+    # 最低码率保护: 语音 24kbps 仍可听
+    if target_bitrate < 24000:
+        target_bitrate = 24000
+        logger.warning(f"[TG上传] 目标码率过低, 限制为 24kbps")
+
+    ext = os.path.splitext(file_path)[1].lower()
+    fd, compressed_path = tempfile.mkstemp(suffix=ext or ".m4a", prefix="compressed_")
+    os.close(fd)
+
+    try:
+        if ext in (".m4a", ".aac"):
+            cmd = ["ffmpeg", "-y", "-i", file_path, "-codec:a", "aac",
+                   "-b:a", str(target_bitrate), "-ac", "2", compressed_path]
+        elif ext == ".mp3":
+            cmd = ["ffmpeg", "-y", "-i", file_path, "-codec:a", "libmp3lame",
+                   "-b:a", str(target_bitrate), "-ac", "2", compressed_path]
+        else:
+            cmd = ["ffmpeg", "-y", "-i", file_path, "-codec:a", "aac",
+                   "-b:a", str(target_bitrate), "-ac", "2", compressed_path]
+
+        subprocess.run(cmd, capture_output=True, check=True, timeout=600)
+
+        compressed_size = os.path.getsize(compressed_path)
+        if compressed_size > 0 and compressed_size < file_size:
+            logger.info(f"[TG上传] 压缩完成: {file_size // 1024 // 1024}MB -> "
+                       f"{compressed_size // 1024 // 1024}MB "
+                       f"(码率 {target_bitrate // 1000}kbps)")
+            return compressed_path, True
+        else:
+            logger.warning(f"[TG上传] 压缩后文件无效或更大, 使用原文件")
+            os.unlink(compressed_path)
+            return file_path, False
+    except Exception as e:
+        logger.warning(f"[TG上传] 压缩失败: {e}")
+        if os.path.exists(compressed_path):
+            os.unlink(compressed_path)
+        return file_path, False
 
 
 def extract_bot_user_id(token: str) -> int | None:
@@ -64,64 +139,75 @@ def upload_audio_to_telegram(
         return {"ok": False, "file_id": "", "message_id": 0, "bot_user_id": bot_user_id,
                 "error": "文件大小为 0", "file_size": 0}
 
-    # TG Bot API 限制：sendAudio 文件最大 50MB
-    if file_size > 50 * 1024 * 1024:
-        return upload_document_to_telegram(file_path, bot_token, chat_id, title, caption, max_retries)
+    # 文件超过 48MB 时自动压缩 (TG Bot API 限制 50MB)
+    upload_path, is_temp = compress_audio_if_needed(file_path)
+    if is_temp:
+        file_size = os.path.getsize(upload_path)
 
-    api_url = f"{_TG_API_BASE}/bot{bot_token}/sendAudio"
+    try:
+        # 压缩后仍超过 50MB, 用 sendDocument 最后尝试
+        if file_size > 50 * 1024 * 1024:
+            return upload_document_to_telegram(
+                upload_path, bot_token, chat_id, title, caption, max_retries)
 
-    for attempt in range(1, max_retries + 1):
-        try:
-            with open(file_path, "rb") as f:
-                files = {"audio": (os.path.basename(file_path), f)}
-                data = {"chat_id": chat_id}
-                if title:
-                    data["title"] = title[:64]  # TG title 限制 64 字符
-                if caption:
-                    data["caption"] = caption[:1024]  # TG caption 限制 1024 字符
+        api_url = f"{_TG_API_BASE}/bot{bot_token}/sendAudio"
+        original_name = os.path.basename(file_path)
 
-                resp = requests.post(api_url, data=data, files=files, timeout=300)
+        for attempt in range(1, max_retries + 1):
+            try:
+                with open(upload_path, "rb") as f:
+                    files = {"audio": (original_name, f)}
+                    data = {"chat_id": chat_id}
+                    if title:
+                        data["title"] = title[:64]  # TG title 限制 64 字符
+                    if caption:
+                        data["caption"] = caption[:1024]  # TG caption 限制 1024 字符
 
-            result = resp.json()
+                    resp = requests.post(api_url, data=data, files=files, timeout=300)
 
-            if resp.status_code == 200 and result.get("ok"):
-                msg = result.get("result", {})
-                audio = msg.get("audio", {})
-                file_id = audio.get("file_id", "")
-                message_id = msg.get("message_id", 0)
-                logger.info(f"[TG上传] 成功: {os.path.basename(file_path)} "
-                           f"({file_size // 1024}KB) msg_id={message_id}")
-                return {
-                    "ok": True,
-                    "file_id": file_id,
-                    "message_id": message_id,
-                    "bot_user_id": bot_user_id,
-                    "error": "",
-                    "file_size": file_size,
-                }
+                result = resp.json()
 
-            # 429 限流
-            if resp.status_code == 429:
-                retry_after = result.get("parameters", {}).get("retry_after", 5)
-                logger.warning(f"[TG上传] 触发限流 (429)，等待 {retry_after} 秒")
-                time.sleep(retry_after)
-                continue
+                if resp.status_code == 200 and result.get("ok"):
+                    msg = result.get("result", {})
+                    audio = msg.get("audio", {})
+                    file_id = audio.get("file_id", "")
+                    message_id = msg.get("message_id", 0)
+                    logger.info(f"[TG上传] 成功: {original_name} "
+                               f"({file_size // 1024}KB) msg_id={message_id}")
+                    return {
+                        "ok": True,
+                        "file_id": file_id,
+                        "message_id": message_id,
+                        "bot_user_id": bot_user_id,
+                        "error": "",
+                        "file_size": file_size,
+                    }
 
-            error_desc = result.get("description", "未知错误")
-            logger.warning(f"[TG上传] 失败 (尝试 {attempt}/{max_retries}): {error_desc}")
+                # 429 限流
+                if resp.status_code == 429:
+                    retry_after = result.get("parameters", {}).get("retry_after", 5)
+                    logger.warning(f"[TG上传] 触发限流 (429)，等待 {retry_after} 秒")
+                    time.sleep(retry_after)
+                    continue
 
-        except requests.exceptions.ConnectionError as e:
-            logger.warning(f"[TG上传] 连接异常 (尝试 {attempt}/{max_retries}): {e}")
-        except Exception as e:
-            logger.warning(f"[TG上传] 异常 (尝试 {attempt}/{max_retries}): {e}")
+                error_desc = result.get("description", "未知错误")
+                logger.warning(f"[TG上传] 失败 (尝试 {attempt}/{max_retries}): {error_desc}")
 
-        if attempt < max_retries:
-            base_delay = 5 * attempt
-            jitter = random.uniform(0, base_delay * 0.5)
-            time.sleep(base_delay + jitter)
+            except requests.exceptions.ConnectionError as e:
+                logger.warning(f"[TG上传] 连接异常 (尝试 {attempt}/{max_retries}): {e}")
+            except Exception as e:
+                logger.warning(f"[TG上传] 异常 (尝试 {attempt}/{max_retries}): {e}")
 
-    return {"ok": False, "file_id": "", "message_id": 0, "bot_user_id": bot_user_id,
-            "error": f"超出最大重试次数 ({max_retries})", "file_size": file_size}
+            if attempt < max_retries:
+                base_delay = 5 * attempt
+                jitter = random.uniform(0, base_delay * 0.5)
+                time.sleep(base_delay + jitter)
+
+        return {"ok": False, "file_id": "", "message_id": 0, "bot_user_id": bot_user_id,
+                "error": f"超出最大重试次数 ({max_retries})", "file_size": file_size}
+    finally:
+        if is_temp and os.path.exists(upload_path):
+            os.unlink(upload_path)
 
 
 def upload_document_to_telegram(
@@ -206,6 +292,9 @@ def upload_with_token_rotation(
                 "bot_token_idx": None,
                 "error": "无可用 Bot Token", "file_size": 0}
 
+    # 预压缩大文件 (仅一次, 避免多 token 重试时重复压缩)
+    actual_path, is_temp = compress_audio_if_needed(file_path)
+
     # Round-robin 选择起始 Token 索引
     global _token_counter
     with _token_counter_lock:
@@ -223,14 +312,14 @@ def upload_with_token_rotation(
 
     try:
         result = upload_audio_to_telegram(
-            file_path, ordered_tokens[0], chat_id, title, caption,
+            actual_path, ordered_tokens[0], chat_id, title, caption,
         )
 
         if not result.get("ok") and len(ordered_tokens) > 1:
             for i, token in enumerate(ordered_tokens[1:], 1):
                 logger.info(f"[TG上传] Token {start_idx} 失败，尝试 Token {(start_idx + i) % len(bot_tokens)}...")
                 result = upload_audio_to_telegram(
-                    file_path, token, chat_id, title, caption,
+                    actual_path, token, chat_id, title, caption,
                 )
                 if result.get("ok"):
                     used_idx = (start_idx + i) % len(bot_tokens)
@@ -244,3 +333,5 @@ def upload_with_token_rotation(
     finally:
         if acquired:
             _UPLOAD_LOCK.release()
+        if is_temp and os.path.exists(actual_path):
+            os.unlink(actual_path)
