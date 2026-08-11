@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import time
 import random
 import threading
@@ -42,43 +43,78 @@ def compress_audio_if_needed(file_path: str, max_size_mb: int = 48) -> tuple[str
 
     # 获取音频时长
     try:
-        r = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", file_path],
-            capture_output=True, text=True, check=True, timeout=60,
-        )
-        duration = float(r.stdout.strip())
-    except Exception as e:
-        logger.warning(f"[TG上传] 获取时长失败, 无法压缩: {e}")
-        return file_path, False
+        # 获取音频编码信息（codec, sample_rate, channels）
+        try:
+            r = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries",
+                 "format=duration:stream=codec_name,sample_rate,channels",
+                 "-of", "json", file_path],
+                capture_output=True, text=True, check=True, timeout=60,
+            )
+            probe = json.loads(r.stdout)
+            duration = float(probe.get("format", {}).get("duration", 0))
+            streams = probe.get("streams", [])
+            audio_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
+        except Exception as e:
+            logger.warning(f"[TG上传] 探测音频信息失败: {e}")
+            return file_path, False
 
-    if duration <= 0:
-        logger.warning(f"[TG上传] 时长无效 ({duration}), 无法压缩")
-        return file_path, False
+        if duration <= 0 or not audio_stream:
+            logger.warning(f"[TG上传] 时长无效 ({duration}) 或无音频流, 无法压缩")
+            return file_path, False
 
-    # 计算目标码率 (bits/s), 留 5% 余量给容器开销
-    target_bitrate = int(max_bytes * 8 / duration * 0.95)
-    # 最低码率保护: 语音 24kbps 仍可听
-    if target_bitrate < 24000:
-        target_bitrate = 24000
-        logger.warning(f"[TG上传] 目标码率过低, 限制为 24kbps")
+        # 计算目标码率 (bits/s), 留 5% 余量给容器开销
+        target_bitrate = int(max_bytes * 8 / duration * 0.95)
+        # 最低码率保护: 语音 24kbps 仍可听
+        if target_bitrate < 24000:
+            target_bitrate = 24000
+            logger.warning(f"[TG上传] 目标码率过低, 限制为 24kbps")
 
-    ext = os.path.splitext(file_path)[1].lower()
-    fd, compressed_path = tempfile.mkstemp(suffix=ext or ".m4a", prefix="compressed_")
-    os.close(fd)
+        codec = audio_stream.get("codec_name", "")
+        sample_rate = audio_stream.get("sample_rate", "44100")
 
-    try:
-        if ext in (".m4a", ".aac"):
-            cmd = ["ffmpeg", "-y", "-i", file_path, "-codec:a", "aac",
-                   "-b:a", str(target_bitrate), "-ac", "2", compressed_path]
-        elif ext == ".mp3":
-            cmd = ["ffmpeg", "-y", "-i", file_path, "-codec:a", "libmp3lame",
-                   "-b:a", str(target_bitrate), "-ac", "2", compressed_path]
-        else:
-            cmd = ["ffmpeg", "-y", "-i", file_path, "-codec:a", "aac",
-                   "-b:a", str(target_bitrate), "-ac", "2", compressed_path]
+        fd, compressed_path = tempfile.mkstemp(suffix=".m4a", prefix="compressed_")
+        os.close(fd)
 
-        subprocess.run(cmd, capture_output=True, check=True, timeout=600)
+        def _run_ffmpeg(bitrate: int, use_vbr: bool = False) -> tuple[int, str]:
+            """执行一次压缩, 返回 (exit_code, stderr_text)。"""
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", file_path,
+                "-vn",                     # 不要视频流（封面图等）
+                "-map", "0:a:0",           # 只取第一个音频流
+                "-codec:a", "aac",
+                "-ar", "44100",            # 标准化采样率
+                "-ac", "2",
+                "-movflags", "+faststart",
+            ]
+            if use_vbr:
+                cmd += ["-q:a", "2"]       # VBR 质量模式 (2=高质量)
+            else:
+                cmd += ["-b:a", str(bitrate)]
+            cmd.append(compressed_path)
+
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+                return result.returncode, result.stderr
+            except subprocess.TimeoutExpired:
+                return 1, "压缩超时 (600s)"
+            except Exception as e:
+                return 1, str(e)
+
+        # 第一次尝试：CBR 目标码率
+        retcode, stderr_text = _run_ffmpeg(target_bitrate)
+        if retcode != 0:
+            logger.warning(f"[TG上传] 压缩失败 (CBR {target_bitrate//1000}kbps): {stderr_text[:2000]}")
+            # 降级重试：VBR 质量模式
+            logger.info(f"[TG上传] 降级重试: VBR 质量模式")
+            retcode, stderr_text = _run_ffmpeg(0, use_vbr=True)
+
+        if retcode != 0:
+            logger.warning(f"[TG上传] 压缩降级也失败: {stderr_text[:2000]}")
+            if os.path.exists(compressed_path):
+                os.unlink(compressed_path)
+            return file_path, False
 
         compressed_size = os.path.getsize(compressed_path)
         if compressed_size > 0 and compressed_size < file_size:

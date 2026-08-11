@@ -188,12 +188,26 @@ def _gtcrn_denoise(audio_path: str, output_wav: str) -> str:
 
 def _split_audio_to_wav(input_file: str, output_dir: str, seg_minutes: int = 60, sr: int = 48000):
     """将长音频分片为 WAV 段。deep-filter 二进制要求 48kHz。"""
+    # 获取音频时长（m4a 可能含视频流，ffprobe 可能返回非零，所以不用 check=True）
     r = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
          "-of", "default=noprint_wrappers=1:nokey=1", input_file],
-        capture_output=True, text=True, check=True, timeout=60,
+        capture_output=True, text=True, timeout=60,
     )
-    total = float(r.stdout.strip())
+    try:
+        total = float(r.stdout.strip())
+    except (ValueError, AttributeError):
+        fallback = f"ffprobe 失败 (exit={r.returncode}): {r.stderr[:200]}"
+        logger.warning(f"获取时长失败: {fallback}，尝试用 ffmpeg 转码整段")
+        # 回退：不切分，直接整段转 WAV
+        os.makedirs(output_dir, exist_ok=True)
+        out = os.path.join(output_dir, "segment_001.wav")
+        subprocess.run(
+            ["ffmpeg", "-i", input_file, "-map", "0:a:0", "-vn", "-ar", str(sr), "-ac", "2",
+             "-sample_fmt", "s16", "-acodec", "pcm_s16le", "-y", out],
+            capture_output=True, check=True, timeout=_FFMPEG_TIMEOUT,
+        )
+        return
     seg_sec = seg_minutes * 60
     n = max(1, math.ceil(total / seg_sec))
     os.makedirs(output_dir, exist_ok=True)
@@ -203,7 +217,7 @@ def _split_audio_to_wav(input_file: str, output_dir: str, seg_minutes: int = 60,
         out = os.path.join(output_dir, f"segment_{i + 1:03d}.wav")
         subprocess.run(
             ["ffmpeg", "-ss", str(start), "-t", str(dur), "-i", input_file,
-             "-vn", "-ar", str(sr), "-ac", "2", "-sample_fmt", "s16",
+             "-map", "0:a:0", "-vn", "-ar", str(sr), "-ac", "2", "-sample_fmt", "s16",
              "-acodec", "pcm_s16le", "-y", out],
             capture_output=True, check=True, timeout=_FFMPEG_TIMEOUT,
         )

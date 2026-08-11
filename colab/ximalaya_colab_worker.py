@@ -330,6 +330,12 @@ class ColabWorker:
                                                     max_retries=1)
                 if status in ("downloaded", "skipped"):
                     break
+                # 好友可见专辑 (ret=706): 不重试, 直接标记任务失败
+                if "ret=706" in status or "仅好友可见" in status or "需要与主播相互关注" in status:
+                    logger.error(f"  专辑需主播关注才能收听, 标记任务 #{job_id} 失败: {status}")
+                    self.fail_job(job_id, f"好友可见专辑: {status}")
+                    return self._report_chapter(job_id, chapter_id, "failed",
+                                               error_message=f"好友可见专辑: {status}")
                 # 系统繁忙 (ret=1001): 不踢出代理, 只轮换, 等一下还能用
                 if "系统繁忙" in status or "ret=1001" in status:
                     if pool:
@@ -580,6 +586,13 @@ class ColabWorker:
                         if result and result.get("ok") and result.get("upload_status") == "uploaded":
                             success_count += 1
                             consecutive_failures = 0
+                        elif result and result.get("ok") and result.get("upload_status") == "failed":
+                            # 专辑已被标记失败, 停止处理
+                            job_failed = True
+                            logger.warning(f"专辑标记失败, 放弃任务 #{job_id}")
+                            for f in futures:
+                                f.cancel()
+                            break
                         else:
                             fail_count += 1
                             consecutive_failures += 1
@@ -684,6 +697,11 @@ class ColabWorker:
                         if result and result.get("ok") and result.get("upload_status") == "uploaded":
                             success_count += 1
                             consecutive_failures = 0
+                        elif result and result.get("ok") and result.get("upload_status") == "failed":
+                            # 专辑已被标记失败, 停止处理
+                            job_failed = True
+                            logger.warning(f"专辑标记失败, 放弃任务 #{job_id}")
+                            break
                         else:
                             fail_count += 1
                             consecutive_failures += 1
