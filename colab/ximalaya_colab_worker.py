@@ -430,9 +430,10 @@ class ColabWorker:
                     else:
                         raise RuntimeError(f"降噪输出文件无效: {denoised_path}")
                 except Exception as de:
-                    # 降噪失败: 跳过降噪, 用原始音频继续上传, 不杀 worker
-                    logger.warning(f"  降噪失败, 跳过降噪用原始音频: {de}")
-                    audio_path = audio_path  # 保持原始路径
+                    # 降噪失败: 不上传原始音频, 标记 pending 等待重试, worker 继续处理下一章
+                    logger.error(f"  降噪失败, 标记章节待重试: {de}")
+                    return self._report_chapter(job_id, chapter_id, "pending",
+                                               error_message=f"降噪失败: {de}")
 
             # ─── 4. 上传降噪后音频到 Telegram ───
             logger.info(f"  上传TG: {chapter_name}")
