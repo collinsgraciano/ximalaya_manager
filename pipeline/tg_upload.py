@@ -47,7 +47,7 @@ def compress_audio_if_needed(file_path: str, max_size_mb: int = 48) -> tuple[str
         try:
             r = subprocess.run(
                 ["ffprobe", "-v", "error", "-show_entries",
-                 "format=duration:stream=codec_name,sample_rate,channels",
+                 "format=duration:stream=codec_type,codec_name,sample_rate,channels",
                  "-of", "json", file_path],
                 capture_output=True, text=True, check=True, timeout=60,
             )
@@ -60,8 +60,16 @@ def compress_audio_if_needed(file_path: str, max_size_mb: int = 48) -> tuple[str
             return file_path, False
 
         if duration <= 0 or not audio_stream:
-            logger.warning(f"[TG上传] 时长无效 ({duration}) 或无音频流, 无法压缩")
-            return file_path, False
+            # ffprobe 无法识别音频流时，仍尝试用固定码率压缩
+            if duration > 0:
+                logger.warning(f"[TG上传] ffprobe 未识别音频流但时长有效 ({duration}s), "
+                               f"尝试用默认码率压缩")
+                target_bitrate = int(max_bytes * 8 / duration * 0.95)
+                if target_bitrate < 24000:
+                    target_bitrate = 24000
+            else:
+                logger.warning(f"[TG上传] 时长无效 ({duration}), 无法压缩")
+                return file_path, False
 
         # 计算目标码率 (bits/s), 留 5% 余量给容器开销
         target_bitrate = int(max_bytes * 8 / duration * 0.95)
