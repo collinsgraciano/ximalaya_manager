@@ -421,13 +421,18 @@ class ColabWorker:
 
                 seg_min = self.config.get("deepfilter_segment_minutes", 60)
                 denoised_path = audio_path.replace(".m4a", "_denoised.m4a")
-                denoised_path = denoise_audio_keep_format(audio_path, denoised_path, seg_min, model=model)
+                try:
+                    denoised_path = denoise_audio_keep_format(audio_path, denoised_path, seg_min, model=model)
 
-                # 用降噪后的文件
-                if os.path.exists(denoised_path) and os.path.getsize(denoised_path) > 0:
-                    audio_path = denoised_path
-                else:
-                    raise RuntimeError(f"降噪输出文件无效: {denoised_path}")
+                    # 用降噪后的文件
+                    if os.path.exists(denoised_path) and os.path.getsize(denoised_path) > 0:
+                        audio_path = denoised_path
+                    else:
+                        raise RuntimeError(f"降噪输出文件无效: {denoised_path}")
+                except Exception as de:
+                    # 降噪失败: 跳过降噪, 用原始音频继续上传, 不杀 worker
+                    logger.warning(f"  降噪失败, 跳过降噪用原始音频: {de}")
+                    audio_path = audio_path  # 保持原始路径
 
             # ─── 4. 上传降噪后音频到 Telegram ───
             logger.info(f"  上传TG: {chapter_name}")

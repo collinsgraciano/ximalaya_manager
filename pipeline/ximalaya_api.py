@@ -711,6 +711,17 @@ def download_track(track_id: str, save_path: str, headers: dict | None = None,
             if not _is_valid_audio_start(head):
                 raise Exception(f"下载文件格式无效 (魔数={head[:8].hex()}, 大小={actual_size})")
 
+            # 用 ffprobe 深层校验：能解析出时长才算有效文件 (防止截断/缺 moov atom)
+            import subprocess as _sp
+            probe = _sp.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", tmp_path],
+                capture_output=True, text=True, timeout=30,
+            )
+            dur = probe.stdout.strip()
+            if not dur:
+                raise Exception(f"下载文件无法解析 (ffprobe: {probe.stderr[:300]})")
+
             import shutil
             shutil.move(tmp_path, save_path)
             return "downloaded", actual_size
