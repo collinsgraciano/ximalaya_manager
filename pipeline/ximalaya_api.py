@@ -649,6 +649,25 @@ def get_download_url(track_id: str, headers: dict | None = None,
     return None, 0, last_error or "未知错误"
 
 
+def _is_valid_audio_start(head: bytes) -> bool:
+    """检查文件头是否为常见音频格式 (m4a/mp4/mp3/adts-aac/wav)。"""
+    if len(head) < 12:
+        return False
+    # M4A/MP4: offset 4 = 'ftyp'
+    if head[4:8] == b"ftyp":
+        return True
+    # MP3: ID3 标签
+    if head[:3] == b"ID3":
+        return True
+    # MP3/ADTS: 0xFF 0xEx 或 0xFF 0xFx (MPEG audio sync word)
+    if head[0] == 0xFF and (head[1] & 0xE0) == 0xE0:
+        return True
+    # WAV: RIFF....WAVE
+    if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
+        return True
+    return False
+
+
 def download_track(track_id: str, save_path: str, headers: dict | None = None,
                    max_retries: int = 3,
                    proxies: dict | None = None,
@@ -685,6 +704,12 @@ def download_track(track_id: str, save_path: str, headers: dict | None = None,
             actual_size = os.path.getsize(tmp_path)
             if actual_size == 0:
                 raise Exception("下载文件为空")
+
+            # 校验文件魔数，防止下载到损坏/错误内容
+            with open(tmp_path, "rb") as f:
+                head = f.read(12)
+            if not _is_valid_audio_start(head):
+                raise Exception(f"下载文件格式无效 (魔数={head[:8].hex()}, 大小={actual_size})")
 
             import shutil
             shutil.move(tmp_path, save_path)

@@ -202,11 +202,13 @@ def _split_audio_to_wav(input_file: str, output_dir: str, seg_minutes: int = 60,
         # 回退：不切分，直接整段转 WAV
         os.makedirs(output_dir, exist_ok=True)
         out = os.path.join(output_dir, "segment_001.wav")
-        subprocess.run(
+        r = subprocess.run(
             ["ffmpeg", "-i", input_file, "-map", "0:a:0", "-vn", "-ar", str(sr), "-ac", "2",
              "-sample_fmt", "s16", "-acodec", "pcm_s16le", "-y", out],
-            capture_output=True, check=True, timeout=_FFMPEG_TIMEOUT,
+            capture_output=True, text=True, timeout=_FFMPEG_TIMEOUT,
         )
+        if r.returncode != 0:
+            raise RuntimeError(f"音频转码失败 (整段): {r.stderr[-500:]}")
         return
     seg_sec = seg_minutes * 60
     n = max(1, math.ceil(total / seg_sec))
@@ -215,12 +217,14 @@ def _split_audio_to_wav(input_file: str, output_dir: str, seg_minutes: int = 60,
         start = i * seg_sec
         dur = min(seg_sec, total - start)
         out = os.path.join(output_dir, f"segment_{i + 1:03d}.wav")
-        subprocess.run(
+        r = subprocess.run(
             ["ffmpeg", "-ss", str(start), "-t", str(dur), "-i", input_file,
              "-map", "0:a:0", "-vn", "-ar", str(sr), "-ac", "2", "-sample_fmt", "s16",
              "-acodec", "pcm_s16le", "-y", out],
-            capture_output=True, check=True, timeout=_FFMPEG_TIMEOUT,
+            capture_output=True, text=True, timeout=_FFMPEG_TIMEOUT,
         )
+        if r.returncode != 0:
+            raise RuntimeError(f"音频转码失败 (segment_{i+1:03d}): {r.stderr[-500:]}")
 
 
 def _df_process_wav(wav_file: str, output_dir: str, model: str = DEFAULT_MODEL) -> str:
