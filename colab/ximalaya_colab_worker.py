@@ -336,6 +336,12 @@ class ColabWorker:
                     self.fail_job(job_id, f"好友可见专辑: {status}")
                     return self._report_chapter(job_id, chapter_id, "failed",
                                                error_message=f"好友可见专辑: {status}")
+                # 内容已不存在 (ret=-3): 不重试, 直接标记任务失败
+                if "ret=-3" in status or "已不存在" in status:
+                    logger.error(f"  内容已不存在, 标记任务 #{job_id} 失败: {status}")
+                    self.fail_job(job_id, f"内容已不存在: {status}")
+                    return self._report_chapter(job_id, chapter_id, "failed",
+                                               error_message=f"内容已不存在: {status}")
                 # 系统繁忙 (ret=1001): 不踢出代理, 只轮换, 等一下还能用
                 if "系统繁忙" in status or "ret=1001" in status:
                     if pool:
